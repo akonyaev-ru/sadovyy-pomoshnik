@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from si_helper import cdp  # noqa: E402
+from si_helper import browser, cdp  # noqa: E402
 
 import os
 

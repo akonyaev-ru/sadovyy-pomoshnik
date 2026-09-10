@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import functools
+import os
 import http.server
 import shutil
 import socketserver
@@ -72,7 +73,7 @@ def chrome(stand_server):
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        browser.remove_profile(profile)
 
 
 # ── сами проверки ────────────────────────────────────────────────────
@@ -228,7 +229,7 @@ def test_injection_reaches_a_newly_opened_tab(stand_server):
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        browser.remove_profile(profile)
 
 
 # ── подключение к уже работающему приложению ─────────────────────────
@@ -260,7 +261,7 @@ def test_debug_port_of_finds_the_port_of_a_running_process(stand_server):
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        browser.remove_profile(profile)
 
 
 def test_debug_port_of_ignores_a_process_without_a_port():
@@ -301,7 +302,7 @@ def test_attached_app_says_alive_until_the_port_dies(stand_server):
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        browser.remove_profile(profile)
 
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -320,6 +321,19 @@ def test_show_app_window_finds_nothing_when_there_is_nothing():
     assert browser.show_app_window([os.getpid()], title_part="такого-окна-нет") == ""
 
 
+# Эти две проверки открывают НАСТОЯЩЕЕ окно браузера и выводят его вперёд:
+# иначе не докажешь, что помощник окно из трея не достаёт. На рабочем столе
+# владельца такое всплывать не должно — он это и заметил. Поэтому по
+# умолчанию они пропускаются, а на машине сборки (где `CI=true`) идут всегда.
+# Запустить у себя намеренно: `SI_OKNA=1 python -m pytest -k show_app_window`.
+s_oknami = pytest.mark.skipif(
+    not (os.environ.get("CI") or os.environ.get("SI_OKNA")),
+    reason="открывает видимое окно; на машине сборки идёт всегда, "
+           "у себя — с SI_OKNA=1",
+)
+
+
+@s_oknami
 def test_show_app_window_raises_a_visible_window(stand_server):
     """Обычное окно выводится вперёд."""
     profile = Path(tempfile.mkdtemp(prefix="si-window-"))
@@ -336,9 +350,10 @@ def test_show_app_window_raises_a_visible_window(stand_server):
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        browser.remove_profile(profile)
 
 
+@s_oknami
 def test_show_app_window_leaves_a_tray_window_alone(stand_server):
     """ГЛАВНОЕ: спрятанное окно НЕ достаём — только сообщаем.
 
@@ -375,7 +390,7 @@ def test_show_app_window_leaves_a_tray_window_alone(stand_server):
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        browser.remove_profile(profile)
 
 
 def _windows_of(pid: int, title_part: str) -> list[int]:

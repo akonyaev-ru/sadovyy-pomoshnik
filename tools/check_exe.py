@@ -105,7 +105,7 @@ def main() -> int:
         finally:
             httpd.shutdown()
             kill_tree(proc)
-            shutil.rmtree(profile, ignore_errors=True)
+            browser.remove_profile(profile)
 
 
 def kill_tree(proc: subprocess.Popen) -> None:

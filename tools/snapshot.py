@@ -113,7 +113,7 @@ def main() -> int:
             except Exception:
                 proc.kill()
             httpd.shutdown()
-            shutil.rmtree(profile, ignore_errors=True)
+            browser.remove_profile(profile)
     return 0
 
 

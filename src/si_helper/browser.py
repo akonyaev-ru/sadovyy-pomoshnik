@@ -59,6 +59,33 @@ def find_chrome() -> Path:
     )
 
 
+def remove_profile(path, tries: int = 6) -> bool:
+    """Убирает временную папку профиля браузера — по-настоящему.
+
+    ЗАЧЕМ ОТДЕЛЬНАЯ ФУНКЦИЯ. Везде стояло
+    `shutil.rmtree(profile, ignore_errors=True)`, и оно молча не срабатывало:
+    Chrome отпускает файлы профиля не в тот же миг, что закрывается процесс.
+    За два дня работы на машине владельца скопилась 61 брошенная папка на
+    258 МБ — нашлось только когда он спросил, зачем на экране мелькают окна.
+    `ignore_errors` тут и виноват: он превращает неудачу в тишину.
+
+    Поэтому пробуем несколько раз с короткой паузой и ЛИШЬ в самом конце
+    сдаёмся молча — к тому времени папка обычно уже удалена.
+    """
+    import shutil
+
+    path = Path(path)
+    for i in range(tries):
+        if not path.exists():
+            return True
+        try:
+            shutil.rmtree(path)
+            return True
+        except OSError:
+            time.sleep(0.4 * (i + 1))
+    return not path.exists()
+
+
 def find_upjers() -> Path | None:
     """Ищет приложение upjers Home. Возвращает None, если его нет."""
     for raw in UPJERS_CANDIDATES:

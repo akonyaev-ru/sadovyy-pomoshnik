@@ -85,7 +85,7 @@ def fresh_browser():
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        browser.remove_profile(profile)
 
 
 @pytest.fixture

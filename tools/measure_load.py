@@ -53,7 +53,7 @@ def measure(inject: bool) -> tuple[float, int]:
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        browser.remove_profile(profile)
 
 
 def main() -> int:

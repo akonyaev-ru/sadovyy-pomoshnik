@@ -1,0 +1,885 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Стенд: правдоподобная подделка «Садовой империи»</title>
+<style>
+	body { background:#20303d; color:#cfe; font:13px system-ui; margin:0; padding:14px; }
+	h1 { font-size:15px; margin:0 0 8px; }
+	p { color:#9ab; max-width:640px; margin:4px 0 12px; }
+	#garden { display:grid; grid-template-columns:repeat(17, 26px); gap:1px; width:max-content; }
+	#garden div { width:26px; height:26px; background:#2c4636; font:9px monospace;
+		color:#8fb; display:flex; align-items:center; justify-content:center; }
+	#garden div.water { background:#2a6b4a; }
+	#garden div.dry   { background:#6b5a2a; }
+	#garden div.empty { background:#243544; color:#456; }
+	#einkaufszettel { display:none; }
+	code { background:#16232e; padding:1px 5px; border-radius:3px; }
+</style>
+
+<h1>Стенд: подделка «Садовой империи»</h1>
+<p>Настоящей игры здесь нет. <code>gardenjs</code>, <code>berechneFelder</code> и
+	очередь действий скопированы из её исходника, чтобы полив проверялся против
+	правдивого поведения. Жёлтые клетки — те, что <b>можно</b> полить.</p>
+
+<!-- Поддельный ряд кнопок игры. Гном помощника должен встать рядом с лейкой.
+     Лейки нет при ?bez_leyki=1 — так проверяется запасной путь. -->
+<div id="gameToolbar" style="display:flex;gap:6px;margin:0 0 10px">
+	<div id="anpflanzen" style="width:34px;height:34px;background:#3a5a3a;border-radius:4px"></div>
+	<div id="giessen"    style="width:34px;height:34px;background:#2f6ea8;border-radius:4px"></div>
+	<div id="ernten"     style="width:34px;height:34px;background:#8a6a2a;border-radius:4px"></div>
+</div>
+
+<div id="garden"></div>
+
+<!-- Нижняя полоса помощников — ТОЧНО как в живой игре.
+     Координаты сняты замером с настоящего аккаунта 2026-09-09, не выдуманы:
+       садовый домик   x=0   y=-4  122×129
+       сорняк          x=210 y=0   45×37
+       зазывала        x=268 y=0   50×45
+       блок гномов     x=370 y=0   175×45
+         исследователь x=419 y=0   36×45
+         поливальщик   x=480 y=0   25×45   (заперт: .off + замок)
+         жнец          x=510 y=0   45×45
+       машина          x=560 y=0   160×55
+       симпы           x=180/210 y=43 30×40
+     Свободного места на весь наш ряд тут НЕТ — самый широкий просвет 88 px. -->
+<div id="wimpareaDiv" style="position:relative;width:720px;height:125px;margin-top:12px;
+	background:#3f6b30;border-radius:4px;overflow:hidden">
+	<div id="wimpareaWimps" style="position:absolute;left:0;top:0;width:720px;height:125px"></div>
+	<div id="wimpareaGardenhouse" class="link" style="position:absolute;left:0;top:-4px;width:122px;height:129px;background:#6b5334"></div>
+	<img id="i0" class="wimp wimp3 link" style="position:absolute;left:180px;top:43px;width:30px;height:40px;background:#8a6" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
+	<img id="i1" class="wimp wimp3 link" style="position:absolute;left:210px;top:43px;width:30px;height:40px;background:#8a6" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
+	<div class="link weed" style="position:absolute;left:210px;top:0;width:45px;height:37px;background:#4a7a35"></div>
+	<div id="barkerOpener" class="link" style="position:absolute;left:268px;top:0;width:50px;height:45px;background:#7a6a45"></div>
+	<div id="wimpareaHelper">
+		<div class="gnomes" style="position:absolute;left:370px;top:0;width:175px;height:45px">
+			<div class="link science slot1" style="position:absolute;left:49px;top:0;width:36px;height:45px;background:#5d8f3d"></div>
+			<div class="link water off" style="position:absolute;left:110px;top:0;width:25px;height:45px;background:#5d8f3d;opacity:.5"></div>
+			<div class="locked" style="position:absolute;left:111px;top:5px;width:35px;height:35px;background:#333"></div>
+			<div class="link harvest" style="position:absolute;left:140px;top:0;width:45px;height:45px;background:#5d8f3d"></div>
+		</div>
+	</div>
+	<div id="wimpareaCar" class="link car0" style="position:absolute;left:560px;top:0;width:160px;height:55px;background:#6a4a4a"></div>
+</div>
+
+<script>
+	// ?bez_pomoshnikov=1 — проверка запасного пути, когда полосы нет
+	if (/[?&]bez_pomoshnikov=1/.test(location.search)) {
+		document.getElementById('wimpareaDiv').remove();
+	}
+
+	/*
+	 * ?tesnaya_polosa=1 — полоса игрока, купившего больше помощников.
+	 *
+	 * Блок гномов игры шире и начинается раньше, поэтому просвет за
+	 * зазывалой (318–370) закрыт и жуку наверху места НЕТ. Ровно этот
+	 * случай был у мамы владельца: жук уезжал по запасному пути в левый
+	 * верхний угол — на крышу домика — и читался как лишний, второй.
+	 */
+	if (/[?&]tesnaya_polosa=1/.test(location.search)) {
+		var g = document.querySelector('#wimpareaHelper .gnomes');
+		g.style.left = '320px';
+		g.style.width = '225px';
+		// Заодно закрываем широкий просвет 122–210 у домика: иначе жук
+		// находит место там, запасной путь не включается, и проверка
+		// зеленеет со сломанным кодом. Поймано мутацией 2026-09-09.
+		var w = document.querySelector('#wimpareaDiv .weed');
+		w.style.left = '122px';
+		w.style.width = '133px';
+	}
+</script>
+
+
+<script>
+	if (/[?&]bez_leyki=1/.test(location.search)) {
+		document.getElementById('giessen').remove();
+	}
+</script>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// 1. Куски, взятые из игры дословно
+// ═══════════════════════════════════════════════════════════════════
+
+// berechneFelder — из wurzel_all.js без изменений (шаг сетки 17, потолок 204)
+function berechneFelder(h,q,o,p,s){h=parseInt(h,10);q=parseInt(q,10);o=parseInt(o,10);p=parseInt(p,10);s=parseInt(s,10);var a;if(s==1){a=0}else{if(q==1&&o==1){a=0}else{a=(o-s+1)*17}}var m=h-q-Math.abs(a);var t=new Array();var r=m;var n=0;var l=0;for(var f=0;f<s;f++){l=r+p;for(var d=0;d<p;d++){r++;if(t[n]==null){if(r>204){t[n]=false}else{if((r%17)==0){if(p==1){t[n]=parseInt(r,10)}else{if(r<l){t[n]=parseInt(r,10);var b=l-r;for(var c=1;c<=b;c++){t[n+c]=false}}else{t[n]=parseInt(r,10)}}}else{t[n]=parseInt(r,10)}}}n++}r=m+((f+1)*17)}return t}
+
+function in_array(needle, hay) { return hay.indexOf(needle) !== -1; }
+
+// ═══════════════════════════════════════════════════════════════════
+// 2. Обстановка игры
+// ═══════════════════════════════════════════════════════════════════
+
+var NOW = Math.floor(Date.now() / 1000);
+var Zeit = { Client: NOW, Verschiebung: 0 };
+var mode = -1;
+var selected = null;
+
+// crop — урожай с растения, price — цена за штуку, growthtime — секунды роста.
+// Числа подобраны так, чтобы порядок выгодности был известен заранее.
+var data_products = {
+	1:  { name: 'Морковь',  category: 'v', sx: 1, sy: 1, plantable: true, crop: 4,  price: 3.0 },
+	2:  { name: 'Огурец',   category: 'v', sx: 1, sy: 1, plantable: true, crop: 5,  price: 2.0 },
+	7:  { name: 'Тыква',    category: 'v', sx: 2, sy: 2, plantable: true, crop: 20, price: 4.0 },
+	40: { name: 'Ёлка',     category: 'z', sx: 1, sy: 1, plantable: true, crop: 1,  price: 99.0 },
+	238:{ name: 'Особое',   category: 'v', sx: 1, sy: 1, plantable: true, crop: 9,  price: 9.0 },
+	50: { name: 'Сарай',    category: 'u', sx: 1, sy: 1 },
+	60: { name: 'Трава',    category: 'h', sx: 1, sy: 1 },
+	70: { name: 'Быстрая',  category: 'v', sx: 1, sy: 1, plantable: true, crop: 3, price: 1.0, speedup_reduction: 600 }
+};
+
+// Время роста игра держит НЕ в data_products, а в записи полки (`growthtime`,
+// приходит с сервера ответом `updatelager`).
+var GROWTH = { 1: 3600, 2: 1800, 7: 7200, 40: 3600, 238: 3600, 70: 600 };
+
+// Полка: сколько чего у игрока. Морковь и огурец есть, тыквы мало.
+var SHELF = { 1: 40, 2: 10, 7: 1 };
+
+var regal = {
+	getCount: function (pid) { return SHELF[pid] || 0; },
+	setCount: function (pid, n) { SHELF[pid] = n; },
+	decrementCount: function (pid, n) { SHELF[pid] = (SHELF[pid] || 0) - (n || 1); },
+	isEmpty: function () { for (var k in SHELF) { if (SHELF[k] > 0) return false; } return true; },
+	getCategory: function (pid) { return data_products[pid] ? data_products[pid].category : false; },
+	getProductInfos: function (pid) {
+		var d = data_products[pid];
+		if (!d) return { sx: 1, sy: 1 };
+		var out = { sx: d.sx, sy: d.sy, category: d.category, name: d.name };
+		if (GROWTH[pid]) out.growthtime = GROWTH[pid];
+		return out;
+	},
+	selectProduct: function (pid) { selected = pid; mode = 0; }
+};
+
+function selectMode(d, a, c, b) { mode = d; }
+
+// ═══════════════════════════════════════════════════════════════════
+// 3. Сад: нарочно разнообразный, чтобы проверка была осмысленной
+// ═══════════════════════════════════════════════════════════════════
+
+var _grid = {};
+var EXPECTED = [];   // клетки, которые ДОЛЖНЫ политься (по одной на растение)
+
+(function buildGarden() {
+	var i;
+	function empty(n) { _grid[n] = { pid:0, category:'', water:0, finished:0, x:1, y:1, sx:1, sy:1 }; }
+	for (i = 1; i <= 204; i++) empty(i);
+
+	function plant(n, pid, opts) {
+		var p = data_products[pid];
+		_grid[n] = {
+			pid: pid, category: p.category,
+			water: opts.water, finished: opts.finished,
+			x: 1, y: 1, sx: p.sx, sy: p.sy
+		};
+	}
+
+	var DRY = NOW - 90000;      // полито больше суток назад — можно поливать
+	var WET = NOW - 3600;       // полито час назад — нельзя
+	var GROW = NOW + 7200;      // ещё растёт
+	var DONE = NOW - 60;        // уже созрело — поливать нечего
+
+	// ── РАССТАНОВКА ВЫВЕРЕНА, НЕ МЕНЯТЬ БЕЗДУМНО ─────────────────────
+	// Игра сбрасывает очередь, накопив шесть действий. Тыква 2×2 поставлена
+	// ШЕСТОЙ нарочно: очередь опустеет ровно после неё, собственный отсев игры
+	// (`alreadyQueued`) перестанет её защищать — и если наш код не отметит все
+	// четыре клетки растения, тыква уйдёт на сервер дважды.
+	// Прежняя расстановка ставила тыкву одиннадцатой, и проверка проходила даже
+	// с нарочно сломанным отсевом: ложный зелёный, пойман 2026-09-09.
+
+	// 1–5: пять обычных овощей под полив
+	[1, 2, 3, 4, 5].forEach(function (n) {
+		plant(n, 1, { water: DRY, finished: GROW });
+		EXPECTED.push(n);
+	});
+
+	// 6-е действие: тыква 2×2 на клетках 30,31,47,48 — ровно на сбросе пачки
+	[30, 31, 47, 48].forEach(function (n, idx) {
+		plant(n, 7, { water: DRY, finished: GROW });
+		_grid[n].x = (idx % 2) + 1;
+		_grid[n].y = Math.floor(idx / 2) + 1;
+	});
+	EXPECTED.push(30);
+
+	// ещё шесть овощей после неё
+	[100, 101, 102, 103, 104, 105].forEach(function (n) {
+		plant(n, 1, { water: DRY, finished: GROW });
+		EXPECTED.push(n);
+	});
+
+	// ── ОПАСНЫЕ КЛЕТКИ: помощник обязан обойти их стороной ──────────
+	plant(13, 50, { water: DRY, finished: GROW });   // постройка → диалог сноса с ценой
+	plant(14, 60, { water: DRY, finished: GROW });   // трава с сорняком → молчаливая прополка
+	_grid[14].weed = true;
+	plant(15, 70, { water: DRY, finished: GROW });   // ускорение → диалог подтверждения
+
+	// 5 недавно политых — нельзя
+	[6, 7, 8, 23, 24].forEach(function (n) { plant(n, 1, { water: WET, finished: GROW }); });
+
+	// 4 созревших — нельзя
+	[9, 10, 25, 26].forEach(function (n) { plant(n, 2, { water: DRY, finished: DONE }); });
+
+	// 2 не-овоща (category 'z') — нельзя
+	[11, 27].forEach(function (n) { plant(n, 40, { water: DRY, finished: GROW }); });
+
+	// 1 растение из списка исключений игры — нельзя
+	plant(12, 238, { water: DRY, finished: GROW });
+})();
+
+// ═══════════════════════════════════════════════════════════════════
+// 4. gardenjs — поведение скопировано с настоящего
+// ═══════════════════════════════════════════════════════════════════
+
+window.__sent = [];       // что ушло бы на сервер
+window.__danger = [];     // побочные действия, которых быть не должно
+window.__planted = [];    // что ушло бы на посадку
+window.__cacheCalls = 0;  // сколько раз дёрнули cache
+
+/*
+ * САДЫ. По умолчанию у игрока их пять, а своей быстрой навигации у игры
+ * на странице НЕТ — ровно случай мамы владельца: `quicknavi.data` игра
+ * заполняет, но рисовать некуда, потому что блока `#quicknavi` нет.
+ *   ?sady_igry=1        — у игры свои кнопки есть, наши не нужны
+ *   ?sady_neizvestny=1  — данных нет; спросить можно только нажатием
+ */
+window.__gardenSwitches = [];
+window.__sadov = 5;
+var quicknavi = { data: {} };
+if (!/[?&]sady_neizvestny=1/.test(location.search)) {
+	for (var _g = 1; _g <= window.__sadov; _g++) quicknavi.data['garden' + _g] = _g;
+	quicknavi.data.greenhouse = 1;   // не сад: в ряд попасть не должно
+	/*
+	 * Грибы и улитки. Игра перечисляет в быстрой навигации только то, что
+	 * игроку доступно, — и мы рисуем кнопку лишь на такое. Режим
+	 * `?net_gribov_i_ulitok=1` убирает их: так выглядит игрок, у которого
+	 * этих мест нет, и кнопок ему рисовать нельзя.
+	 */
+	if (!/[?&]net_gribov_i_ulitok=1/.test(location.search)) {
+		quicknavi.data.megafruit = 1;
+		quicknavi.data.snailracing = 1;
+	}
+	// Ноль игра считает «нельзя»: у себя рисует иконку без действия.
+	quicknavi.data.mine = 0;
+}
+
+// Куда игрок перешёл и что открыл. Проверки смотрят сюда.
+window.__gdeMy = [];
+window.__otkryto = [];
+function setLocation(key) { window.__gdeMy.push(key); }
+function initMegafruit() { window.__otkryto.push('megafruit'); }
+var snailracing = { init: function () { window.__otkryto.push('snailracing'); } };
+if (/[?&]sady_igry=1/.test(location.search)) {
+	var qn = document.createElement('div');
+	qn.id = 'quicknavi';
+	for (var _q = 1; _q <= window.__sadov; _q++) {
+		qn.innerHTML += '<div id="garden' + _q + '_quick" class="quicknavi-garden quicknavi-icon"></div>';
+	}
+	document.body.appendChild(qn);
+}
+var __currentGarden = 1;
+function waehleGarten(n) { window.__gardenSwitches.push(n); __currentGarden = n; }
+
+// Город: у Ивана на него было две кнопки. В игре это `zeigeStadtMain(1)` —
+// рынок и `(2)` — карта города. Сама функция объявлена ниже, вместе с
+// рамками города: она и нажатие записывает, и кадр открывает — иначе
+// объявленная позже перекрыла бы эту, и `__city` молча перестал бы
+// наполняться. Поймано 2026-09-10.
+window.__city = [];
+// Запрос к серверу: считаем обращения, чтобы проверять «без нажатия молчим».
+window.__citymapAsks = 0;
+var ajax = {
+	request: function (url, params, cb) {
+		if (params && params['do'] === 'citymap_init') {
+			window.__citymapAsks++;
+			setTimeout(function () { cb({ data: { garden_count: window.__sadov, garden_max: 7 } }); }, 10);
+			return;
+		}
+		if (url === 'verkaufajax' && params && params['do'] === 'getData') {
+			window.__wimpAsks++;
+			var sheet = WIMP_SHEETS[params.id];
+			setTimeout(function () { cb(sheet); }, 10);
+			return;
+		}
+		window.__sent.push(params);
+	}
+};
+
+var gardenjs = (function () {
+	var my = {};
+	var d = [];            // очередь, как в игре
+	var s = 7, c = 2000;   // порог пачки и таймер — числа из игры
+	var timer = 0;
+
+	my.getGrid = function () { return _grid; };
+	my.getElements = function () { return {}; };
+	my.getCurrentGarden = function () { return __currentGarden; };
+	my.getRestrictTo = function () { return null; };
+	my.getPossibleCategories = function () { return { all: { v:1, z:1, vz:1 } }; };
+
+	my.getFieldData = function (n) {
+		var out = {}, k;
+		for (k in _grid[n]) out[k] = _grid[n][k];
+		return out;
+	};
+
+	function alreadyQueued(D) {
+		for (var i = 0; i < D.length; i++)
+			for (var j = 0; j < d.length; j++)
+				if (d[j].felder.indexOf(D[i]) !== -1) return true;
+		return false;
+	}
+
+	my.action = {};
+
+	my.action.cache = function (R) {
+		window.__cacheCalls++;
+		// как в игре: открытый список покупок блокирует всё
+		if (document.getElementById('einkaufszettel').style.display === 'block' || R <= 0) return false;
+
+		var P = Zeit.Client - Zeit.Verschiebung;
+		var B = P - 86400;
+		var K = mode;
+		var S = my.getFieldData(R);
+		var D = berechneFelder(R, S.x, S.y, S.sx, S.sy);
+		var J = _grid[R].category;
+
+		// ─── ОПАСНЫЕ ВЕТКИ ИГРЫ ────────────────────────────────────────
+		// В настоящей игре они срабатывают ДО проверки режима: полив тут ни
+		// при чём, а действие уже произошло. Первая открывает диалог сноса с
+		// ценой, вторая молча полет сорняк, третья предлагает ускорение.
+		// Ровно на них 2026-09-09 напоролся живой аккаунт: помощник открыл
+		// «В самом деле убрать? Цена: 2,50 сТ». Стенд их не воспроизводил —
+		// поэтому проверки и молчали.
+		if (J === 'u') { window.__danger.push('снос ' + R); return false; }
+		if (J === 'h' && _grid[R].weed) { window.__danger.push('прополка ' + R); return false; }
+		if (data_products[_grid[R].pid] && data_products[_grid[R].pid].speedup_reduction && K !== 1) {
+			window.__danger.push('ускорение ' + R); return false;
+		}
+
+		if (K === 2 && in_array(_grid[R].pid, [238, 253, 263, 285, 459])) return false;
+
+		// Посадка считает площадь от выбранного растения, а не от того, что
+		// лежит на клетке, — как в игре (`case 0` в её `cache`).
+		if (K === 0) {
+			if (!selected || !data_products[selected] || !data_products[selected].plantable) return false;
+			var Q = regal.getProductInfos(selected);
+			D = berechneFelder(R, 1, 1, Q.sx, Q.sy);
+		}
+
+		if (D.indexOf(false) !== -1 || alreadyQueued(D)) return false;
+		if (K === -1) return false;
+
+		for (var i = 0; i < D.length; i++) {
+			var C = _grid[D[i]];
+			if (K === 2) {
+				if (C.pid === 0 || C.finished <= P || C.water >= B || C.category !== 'v') return false;
+			}
+			if (K === 0) {
+				if (C.pid !== 0 || regal.getCount(selected) < 1) return false;
+			}
+		}
+
+		if (K === 0) regal.decrementCount(selected);
+		d.push({ feld: R, felder: D, mode: K, pflanze: selected });
+		if (d.length >= s - 1) my.action.cacheFlush();
+		else { clearTimeout(timer); timer = setTimeout(my.action.cacheFlush, c); }
+	};
+
+	my.action.cacheFlush = function () {
+		clearTimeout(timer);
+		if (!d.length) return;
+		var water = d.filter(function (e) { return e.mode === 2; }).map(function (e) { return e.feld; });
+		if (water.length) window.__sent.push({ file: 'wasser', felder: water });
+
+		var plant = d.filter(function (e) { return e.mode === 0; });
+		if (plant.length) {
+			window.__planted.push({
+				file: 'pflanz',
+				felder: plant.map(function (e) { return e.feld; }),
+				pflanze: plant[0].pflanze
+			});
+			// Игра действительно сажает: отражаем это в саду, иначе повторный
+			// запуск «посадить» снова увидит клетки пустыми.
+			plant.forEach(function (e) {
+				e.felder.forEach(function (n) {
+					if (!n) return;
+					var pr = data_products[e.pflanze];
+					_grid[n] = { pid: e.pflanze, category: pr.category, water: 0,
+						finished: Zeit.Client + 3600, x: 1, y: 1, sx: pr.sx, sy: pr.sy };
+				});
+			});
+		}
+		d = [];
+	};
+
+	return my;
+})();
+
+// ═══════════════════════════════════════════════════════════════════
+// 5. Разметка сада: клетки #gardenTile<N>, как в игре
+// ═══════════════════════════════════════════════════════════════════
+
+(function draw() {
+	var g = document.getElementById('garden'), i, el, cell;
+	var P = NOW, B = NOW - 86400;
+	for (i = 1; i <= 204; i++) {
+		cell = _grid[i];
+		el = document.createElement('div');
+		el.id = 'gardenTile' + i;
+		if (cell.pid === 0) { el.className = 'empty'; }
+		else if (cell.category === 'v' && cell.finished > P && cell.water < B
+			&& [238,253,263,285,459].indexOf(cell.pid) === -1) { el.className = 'dry'; el.textContent = i; }
+		else { el.className = 'water'; }
+		g.appendChild(el);
+	}
+})();
+
+console.log('стенд готов: ожидается политых растений —', EXPECTED.length, EXPECTED);
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     ПРАВАЯ РАМКА ИГРЫ. В настоящей игре это узкая полоса у правого края
+     (`#asd {position:absolute;right:0;width:20px;height:640px}` в её style.css),
+     и именно в неё CupIvan вешал столбик садов. Размеры взяты оттуда.
+     ═══════════════════════════════════════════════════════════════ -->
+<div id="asd" style="position:absolute;right:0;top:0;width:20px;height:640px;background:#2a3b48">
+	<div class="rahmen-hoch-rechts" style="position:absolute;top:0;left:0;width:20px;height:190px;background:#35485a"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     ВОДНЫЙ САД. Включается ?wg=1.
+     ═══════════════════════════════════════════════════════════════ -->
+<div id="watergarden_container" style="display:none;margin-top:12px">
+	<h1 style="font-size:14px;margin:0 0 6px">Водный сад</h1>
+	<div id="wgGrid" style="display:grid;grid-template-columns:repeat(17, 26px);gap:1px;width:max-content"></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// 6. Водный сад — по `WatergardenClass` из wurzel_all.js
+//
+// Это ОТДЕЛЬНЫЙ объект игры со своей сеткой, своей очередью
+// (`do=watergardenCache`) и своими правилами. `gardenjs` при этом никуда не
+// девается и продолжает держать состояние обычного сада — поэтому всякий его
+// вызов, пока открыт водный сад, здесь считается ОПАСНЫМ: он действует по
+// невидимому игроку саду.
+//
+// Клетка водного сада — массив, а не объект (как в игре):
+//   [0] pid, [1] x, [2] y — для `berechneFelder`
+//   [3] возраст, при котором созревает
+//   [4] возраст, в котором полили (0 — не поливали ни разу)
+//   [10] + [11] — нынешний возраст растения
+// Условия взяты из её `gridAction`: полить можно, если с прошлого полива
+// прошли сутки (`86400 - (возраст - o[4]) <= 0`), созревшее — уже не поливают.
+// ═══════════════════════════════════════════════════════════════════
+
+var WG_ON = /[?&]wg=1/.test(location.search);
+
+// Товары водного сада. 'w' — растение, 'wd' — украшение, 'u' — сорняк
+// (в игре клик по нему открывает ПЛАТНЫЙ диалог прополки).
+data_products[300] = { name: 'Кувшинка', category: 'w',  sx: 1, sy: 1, plantable: true, crop: 6,  price: 5.0 };
+data_products[301] = { name: 'Лотос',    category: 'w',  sx: 2, sy: 1, plantable: true, crop: 14, price: 6.0 };
+data_products[302] = { name: 'Камыш',    category: 'w',  sx: 1, sy: 1, plantable: true, crop: 3,  price: 2.0, edge: true };
+data_products[303] = { name: 'Ракушка',  category: 'wd', sx: 1, sy: 1, plantable: true };
+data_products[304] = { name: 'Тина',     category: 'u',  sx: 1, sy: 1 };
+GROWTH[300] = 3600; GROWTH[301] = 7200; GROWTH[302] = 1800;
+
+// Полка водного сада. Кувшинок нарочно мало: на них проверяется «семена кончились».
+SHELF[300] = 14; SHELF[301] = 2; SHELF[302] = 4; SHELF[303] = 1;
+// Кувшинок нарочно БОЛЬШЕ, чем порог очереди (10): только так открывается
+// окно, в котором собственная защита игры слепа — см. sendCache ниже.
+
+regal.isWater      = function (pid) { return !!data_products[pid] && data_products[pid].category === 'w'; };
+regal.isWaterDeco  = function (pid) { return !!data_products[pid] && data_products[pid].category === 'wd'; };
+regal.loadWater    = function () { };
+
+var watergarden = (function () {
+	var my = {};
+	my.isOpen = false;
+	my.tilesPerRow = 17;
+	my.timeSinceLastSync = 0;
+	my.grid = {};
+	my.gridDefinition = {};
+
+	var cacheContainer = {}, cacheCount = 0, cacheMax = 10, cacheTimer = 0, cacheTimeout = 1000;
+
+	// getFields — из игры без изменений.
+	my.getFields = function (j, f, d) {
+		var b = [], c, a, h;
+		for (h = 0; h < d; h++) {
+			for (a = 0; a < f; a++) { c = j + a + h * my.tilesPerRow; b.push(c); }
+		}
+		return b;
+	};
+
+	// cache — из игры без изменений, кроме записи в __sent вместо сети.
+	my.cache = function (b, f, d) {
+		window.__wgCacheCalls++;
+		if (cacheTimer) { clearTimeout(cacheTimer); }
+		if (typeof cacheContainer.water === 'undefined') {
+			cacheContainer = { plant: [], water: [], harvest: [], remove: [] };
+		}
+		if (d === 'plant') { cacheContainer.plant.push({ pid: b, pos: f }); }
+		var a = my.getFields(f, data_products[b].sx, data_products[b].sy);
+		for (var c = 0; c < a.length; c++) {
+			if (d === 'plant') {
+				if (!my.grid[a[c]]) my.grid[a[c]] = [];
+				my.grid[a[c]][0] = b;
+			} else {
+				cacheContainer[d].push(a[c]);
+			}
+		}
+		cacheCount++;
+		if (cacheCount > cacheMax) { my.sendCache(); }
+		else { cacheTimer = setTimeout(my.sendCache, cacheTimeout); }
+	};
+
+	my.sendCache = function () {
+		if (cacheTimer) { clearTimeout(cacheTimer); cacheTimer = 0; }
+		var kinds = ['plant', 'water', 'harvest', 'remove'], k, out = { file: 'watergardenCache' }, any = false;
+		for (k = 0; k < kinds.length; k++) {
+			var list = cacheContainer[kinds[k]];
+			if (!list || !list.length) continue;
+			out[kinds[k]] = list.slice();
+			any = true;
+		}
+		cacheContainer = {}; cacheCount = 0;
+		if (any) window.__sent.push(out);
+
+		/*
+		 * ПОЛКА ОБНОВЛЯЕТСЯ ОТВЕТОМ СЕРВЕРА, А НЕ СРАЗУ.
+		 *
+		 * В игре счёт семян приходит в `incomingAjax` (`regal.setCount`), то
+		 * есть с задержкой сети. Между отправкой очереди и ответом
+		 * собственная защита игры («на полке меньше, чем уже отложено»)
+		 * СЛЕПА: контейнер уже очищен, а счётчик ещё старый. Без этой
+		 * задержки стенд был добрее игры, и проверка «сажаем ровно по числу
+		 * семян» зеленела на сломанном коде.
+		 *
+		 * Задержка нарочно НЕ маленькая: на быстром ответе окно слепоты
+		 * закрывалось раньше, чем помощник успевал выйти за число семян, и
+		 * проверка снова зеленела на сломанном коде. Медленный ответ сервера —
+		 * не выдумка: это обычное дело на плохой связи.
+		 */
+		if (out.plant && out.plant.length) {
+			var posazheno = {};
+			out.plant.forEach(function (e) { posazheno[e.pid] = (posazheno[e.pid] || 0) + 1; });
+			setTimeout(function () {
+				for (var pid in posazheno) {
+					regal.setCount(pid, Math.max(0, regal.getCount(pid) - posazheno[pid]));
+				}
+			}, 1500);
+		}
+	};
+
+	// plant — из игры: не сажает, если на полке меньше, чем уже отложено.
+	my.plant = function (a, d) {
+		if (typeof cacheContainer.plant !== 'undefined') {
+			var c = 0;
+			for (var b = 0; b < cacheContainer.plant.length; b++) {
+				if (a === cacheContainer.plant[b].pid) c++;
+			}
+			if (regal.getCount(a) <= c) return;
+		}
+		my.cache(a, d, 'plant');
+	};
+
+	my.water = function (a) { my.cache(my.grid[a][0], a, 'water'); };
+
+	// Серверные «одним запросом». Почти наверняка платные — звать их нельзя.
+	my.waterAll   = function () { window.__danger.push('watergardenWaterAll'); };
+	my.harvestAll = function () { window.__danger.push('watergardenHarvestAll'); };
+
+	my.open = function () { my.isOpen = true; window.currentGarden = 101; };
+	my.close = function () { my.isOpen = false; window.currentGarden = 1; };
+
+	return my;
+})();
+
+window.__wgCacheCalls = 0;
+window.WG_EXPECTED = [];        // клетки, которые ДОЛЖНЫ политься (по одной на растение)
+window.WG_FREE_WATER = [];      // свободные клетки «вода» — куда можно сажать
+
+(function buildWaterGarden() {
+	var n;
+
+	// Разметка поля: верхний и нижний ряд — берег, середина — вода,
+	// три клетки закрыты вовсе.
+	var BLOCKED = [100, 101, 102];
+	for (n = 1; n <= 204; n++) {
+		if (BLOCKED.indexOf(n) !== -1) watergarden.gridDefinition[n] = 'blocked';
+		else if (n <= 17 || n >= 188) watergarden.gridDefinition[n] = 'edge';
+		else watergarden.gridDefinition[n] = 'water';
+	}
+
+	function put(cell, pid, age, wateredAt, ripeAt, x, y) {
+		var a = [];
+		a[0] = pid; a[1] = x || 1; a[2] = y || 1;
+		a[3] = ripeAt; a[4] = wateredAt || 0;
+		a[10] = age; a[11] = 0;
+		watergarden.grid[cell] = a;
+	}
+
+	// ── что растёт ───────────────────────────────────────────────
+	put(20, 300, 1000, 0, 3600);              // не поливали ни разу → ПОЛИТЬ
+	put(21, 300, 90000, 89000, 200000);       // полили час назад → нельзя
+	put(22, 301, 500, 0, 7200, 1, 1);         // лотос 2×1, левая половина → ПОЛИТЬ
+	put(23, 301, 500, 0, 7200, 2, 1);         // его же правая половина
+	put(24, 300, 4000, 0, 3600);              // созрело → не поливаем
+	put(25, 304, 500, 0, 999999);             // СОРНЯК — не трогать вовсе
+	put(26, 303, 500, 0, 999999);             // украшение — не трогать
+	put(5,  302, 100, 0, 1800);               // камыш на берегу → ПОЛИТЬ
+
+	window.WG_EXPECTED = [5, 20, 22];
+
+	for (n = 1; n <= 204; n++) {
+		if (watergarden.gridDefinition[n] !== 'water') continue;
+		if (watergarden.grid[n] && watergarden.grid[n][0]) continue;
+		window.WG_FREE_WATER.push(n);
+	}
+
+	// ── разметка клеток: #wgGrid<N>, как в игре ──────────────────
+	var g = document.getElementById('wgGrid'), el, i;
+	for (i = 1; i <= 204; i++) {
+		el = document.createElement('div');
+		el.id = 'wgGrid' + i;
+		el.style.cssText = 'width:26px;height:26px;font:9px monospace;display:flex;'
+			+ 'align-items:center;justify-content:center;color:#cfe';
+		var kind = watergarden.gridDefinition[i];
+		el.style.background = kind === 'blocked' ? '#1b2833' : (kind === 'edge' ? '#4a5a3a' : '#1d4a6b');
+		if (watergarden.grid[i] && watergarden.grid[i][0]) {
+			el.textContent = i;
+			el.style.background = '#2a7ba8';
+		}
+		g.appendChild(el);
+	}
+
+	if (WG_ON) {
+		document.getElementById('watergarden_container').style.display = 'block';
+		document.getElementById('garden').style.display = 'none';
+		watergarden.open();
+		// Полка водного сада: выбираем кувшинку, как сделала бы игра.
+		selected = 300;
+		mode = 0;
+	}
+
+	console.log('водный сад: ожидается политых —', window.WG_EXPECTED.length, window.WG_EXPECTED,
+		'| свободных клеток воды —', window.WG_FREE_WATER.length);
+})();
+
+// ── ЛОВУШКА: обычный сад, пока открыт водный ─────────────────────────
+// В настоящей игре `gardenjs` остаётся заряжен ПРЕДЫДУЩИМ садом, а игрок его
+// не видит. Любое действие через него — действие вслепую по чужому саду.
+(function guardNormalGarden() {
+	var real = gardenjs.action.cache;
+	gardenjs.action.cache = function (n) {
+		if (watergarden.isOpen) {
+			window.__danger.push('обычный сад тронут ' + n);
+			return false;
+		}
+		return real.apply(this, arguments);
+	};
+})();
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     ЛИСТОК ПОПРОШАЙКИ. Разметка и размеры — из style.css игры
+     (`#wimpVerkauf` 320×400, список на top:90, сумма на top:310).
+     ═══════════════════════════════════════════════════════════════ -->
+<style>
+	#einkaufszettel { position:absolute; z-index:100; top:0; width:720px; height:510px;
+		background:#e8dfc4; color:#222; }
+	#wimpVerkauf { position:absolute; top:50px; left:50%; margin-left:-160px;
+		width:320px; height:400px; }
+	#wimpVerkauf .blau { color:#333366; font-size:22px; font-family:Verdana; }
+	#wimpVerkauf .rot  { color:#c03333; font-size:22px; font-family:Verdana; }
+	#wimpVerkaufHeadline { position:absolute; top:30px; left:70px; width:180px;
+		text-align:center; font-weight:bold; }
+	#wimpVerkaufProducts { position:absolute; top:90px; width:320px; text-align:center; height:240px; }
+	#wimpVerkaufSum { position:absolute; top:310px; width:320px; text-align:center; height:20px; }
+	#wimpVerkaufButtons { position:absolute; top:340px; left:0; width:290px; padding:4px 10px; }
+	#wimpVerkaufYes.inactive { background:#aaa; }
+</style>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// 7. Попрошайки — по объекту `wimparea` из wurzel_all.js
+//
+// Главное, что стенд обязан повторить: игра ДЕРЖИТ КЭШ листков
+// (`q[i].sheet`). Второй раз на сервер она не ходит, а значит перехват
+// одного лишь ajax листка не увидит. Если стенд не кэширует, проверка
+// зеленеет на коде, который у живого игрока молчал бы через раз.
+// ═══════════════════════════════════════════════════════════════════
+
+// Деньги печатаются форматом игры — number_format скопирована из её исходника.
+// Порядок как в игре: number_format(сумма, 2, t_price[1] — разделитель
+// дробной части, t_price[3] — разделитель тысяч). По-русски: «8.673,08 сТ».
+var t_price = ['', ',', 'сТ', '.'];
+function number_format(t,w,q,u){var x=t,y=w;x=!isFinite(+x)?0:+x;y=!isFinite(+y)?0:Math.abs(y);var n=(typeof u=="undefined")?",":u;var v=(typeof q=="undefined")?".":q;var o=(y>0)?x.toFixed(y):Math.round(x).toFixed(y);var p=Math.abs(x).toFixed(y);var r,s;if(p>=1000){r=p.split(/\D/);s=r[0].length%3||3;r[0]=o.slice(0,s+(x<0))+r[0].slice(s).replace(/(\d{3})/g,n+"$1");o=r.join(v)}else{o=o.replace(".",v)}return o}
+function formatMoney(a){ return number_format(a, 2, t_price[1], t_price[3]) + '&nbsp;' + t_price[2]; }
+
+// Бонус к сумме попрошайки: игра умножает на (1 + доля) и округляет вверх.
+// Включается ?bonus=1 — на нём проверяется, что процент считается от того же
+// числа, которое видит игрок, а не от голой суммы.
+var specialbonus = /[?&]bonus=1/.test(location.search)
+	? { data: { wimps: { money: 0.2 } } }
+	: null;
+
+// Листки попрошаек. Цены товаров — из data_products: морковь 3, огурец 2,
+// тыква 4. На полке 40 моркови, 10 огурцов, 1 тыква.
+var WIMP_SHEETS = {
+	// 10×3 + 5×2 = 40 «по цене игры», предлагают 48 → +20 %, всё есть
+	11: { id: 11, sum: 48, neighbours: [-1, 12],
+		products: [ { pid: 1, amount: 10, name: 'Морковь' },
+		            { pid: 2, amount: 5,  name: 'Огурец'  } ] },
+	// 20×4 = 80 «по цене игры», предлагают 60 → −25 %, тыквы не хватает 19
+	12: { id: 12, sum: 60, neighbours: [11, -1],
+		products: [ { pid: 7, amount: 20, name: 'Тыква' } ] }
+};
+
+window.__wimpAsks = 0;     // сколько раз ходили на сервер за листком
+
+var wimparea = (function () {
+	var p = {};
+	var q = { 11: { id: 11, sheet: null }, 12: { id: 12, sheet: null } };
+
+	// show — из игры: если листок уже приходил, второй раз не спрашиваем.
+	p.show = function (z) {
+		document.getElementById('einkaufszettel').style.display = 'block';
+
+		function y(B) {
+			q[B.id].sheet = B;                     // кэш игры
+			var F = '', C, I = true, H;
+			for (C = 0; C < B.products.length; C++) {
+				if (regal.getCount(B.products[C].pid) >= B.products[C].amount) { H = 'blau'; }
+				else { H = 'rot'; I = false; }
+				F += '<div class="' + H + '">' + B.products[C].amount + ' x ' + B.products[C].name + '</div>';
+			}
+			document.getElementById('wimpVerkaufProducts').innerHTML = F;
+
+			var D = B.sum, G = 0;
+			if (specialbonus && specialbonus.data && specialbonus.data.wimps
+				&& specialbonus.data.wimps.money) { G += specialbonus.data.wimps.money; }
+			if (G > 0) { D = Math.ceil(B.sum * (1 + G)); }
+			document.getElementById('wimpVerkaufSumAmount').innerHTML = formatMoney(D);
+
+			var yes = document.getElementById('wimpVerkaufYes');
+			if (I) { yes.className = ''; } else { yes.className = 'inactive'; }
+		}
+
+		if (q[z].sheet) { y(q[z].sheet); }
+		else {
+			ajax.request('verkaufajax', { 'do': 'getData', id: z, garden: window.currentGarden }, y);
+		}
+	};
+
+	p.close = function () { document.getElementById('einkaufszettel').style.display = 'none'; };
+	return p;
+})();
+</script>
+
+<!-- ═══ ГОРОД И РЫНОК ═══════════════════════════════════════════════
+	Рынка в `wurzel_all.js` нет: это отдельные серверные страницы в трёх
+	вложенных кадрах. Повторяем всю цепочку, иначе обход кадров останется
+	непроверенным.
+	  верхнее окно → #stadtframe (stand-stadt.html) → #shopframe (палатка)
+-->
+<div id="stadt" style="display:none; position:fixed; left:20px; top:20px;
+	width:660px; height:420px; background:#1b2b14; border:2px solid #000; z-index:50">
+	<iframe id="stadtframe" src="about:blank" style="width:100%;height:100%;border:0"></iframe>
+</div>
+
+<script>
+var stadt = false;
+var __gorodOtkryt = 0;      // сколько раз открывали город
+
+function zeigeStadtMain(karte) {
+	window.__city.push(karte);          // для проверки кнопок города
+	stadt = true;
+	__gorodOtkryt++;
+	document.getElementById('stadtframe').src = 'stand-stadt.html';
+	document.getElementById('stadt').style.display = 'block';
+}
+
+function zeige(chto) {
+	// В игре эта функция живёт в ВЕРХНЕМ окне и подменяет #shopframe.
+	var sw = document.getElementById('stadtframe').contentWindow;
+	var sf = sw.document.getElementById('shopframe');
+	if (!sf) return false;
+	if (chto === 'markt') { sf.src = '/stadt/markt.php?page=1&order=&v='; return true; }
+	return false;
+}
+
+function stadtVerlassen() {
+	stadt = false;
+	document.getElementById('stadt').style.display = 'none';
+	/*
+	 * Кадр НЕ чистим — так делает живая игра: выйдя из города, она лишь
+	 * прячет накладку, а страница палатки остаётся внутри. Пока стенд её
+	 * очищал, он был добрее игры: помощник «видел», что палатки нет, и
+	 * честно открывал город заново. На живой игре 2026-09-10 он вместо
+	 * этого решал, что палатка уже открыта, и нажатие на гнома не делало
+	 * ничего видимого.
+	 */
+}
+
+/*
+ * ПОДДЕЛКА ОТВЕТА РЫНКА.
+ *
+ * Помощник узнаёт цену запросом `/stadt/markt.php?...&v=<pid>` — одной
+ * загрузкой по нажатию, а не обходом скрытым кадром, как делал Иван.
+ * Стенд отвечает на этот запрос так же, как отвечает игра, ВКЛЮЧАЯ
+ * неудобное: заголовок первой строкой, запятая в дробной части, точка в
+ * тысячах, посторонний текст в ячейке и товар вовсе без предложений.
+ */
+var __zaprosyRynka = [];
+var RYNOK = {
+	6:  [['14.946', 'морковь', 'FISHgarden', '0,08 сT', '1.195,68 сT'],
+	     ['6.798',  'морковь', 'кактус',     '0,09 сT', '611,82 сT'],
+	     ['17.000', 'морковь', 'Одуванчик',  '0,18 сT', '3.060,00 сT']],
+	// салат: самое дешёвое уже равно нижней границе коридора (0,02) —
+	// подрезать некуда, помощник обязан упереться в min, а не уйти в 0,01.
+	2:  [['458',   'салат', 'Одуванчик', '0,02 сT', '9,16 сT'],
+	     ['2.231', 'салат', 'FISHgarden', '0,10 сT', '223,10 сT']],
+	// огурец: предложений нет вовсе
+	12: []
+};
+
+var _nastoyashchiyFetch = window.fetch;
+window.fetch = function (url, opts) {
+	var s = String(url);
+	if (s.indexOf('/stadt/markt.php') !== -1) {
+		var m = /[?&]v=(\d+)/.exec(s);
+		var pid = m ? parseInt(m[1], 10) : 0;
+		__zaprosyRynka.push(pid);
+		var rows = RYNOK[pid] || [];
+		var html = '<table><tr><td>Количество</td><td>Продукт</td><td>продавец</td>' +
+			'<td>Цена/шт.</td><td>всего</td><td></td></tr>';
+		for (var i = 0; i < rows.length; i++) {
+			html += '<tr><td>' + rows[i][0] + '</td><td>' + rows[i][1] + '</td><td>' +
+				rows[i][2] + '</td><td>' + rows[i][3] + '</td><td>' + rows[i][4] +
+				'</td><td>слишком дорого!</td></tr>';
+		}
+		html += '</table>';
+		return Promise.resolve(new Response(html, { status: 200,
+			headers: { 'Content-Type': 'text/html' } }));
+	}
+	return _nastoyashchiyFetch.apply(window, arguments);
+};
+</script>
+
+<div id="einkaufszettel">
+	<div id="wimpVerkauf">
+		<div id="wimpVerkaufHeadline">Список</div>
+		<div id="wimpVerkaufProducts"></div>
+		<div id="wimpVerkaufSum">Сумма: <span id="wimpVerkaufSumAmount"></span></div>
+		<div id="wimpVerkaufButtons"><input id="wimpVerkaufYes" type="button" value="Да"></div>
+	</div>
+</div>
+
+<script>
+	// Панель помощника грузится только при ?panel=1 — так проверяется и
+	// поведение чистой страницы, и работа панели.
+	if (/[?&]panel=1/.test(location.search)) {
+		document.write('<scr' + 'ipt src="../src/panel.js"><\/scr' + 'ipt>');
+	}
+</script>

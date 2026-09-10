@@ -1,0 +1,72 @@
+<meta charset="utf-8">
+<title>Стенд: город</title>
+<!--
+	Подделка `stadt/index.php?karte=1` — СРЕДНЕЙ из трёх рамок.
+
+	Нужна не для красоты: настоящий рынок лежит на три кадра вглубь
+	(верхнее окно → #stadtframe → #shopframe), и помощник добирается до него
+	через `contentWindow`. Если стенд сплющить в один уровень, обход кадров
+	останется непроверенным — а именно там и живут ошибки.
+-->
+<style>
+	body { margin: 0; font: 13px system-ui, sans-serif; background: #24391b; color: #eaf6e6; }
+	#shopframe { width: 100%; height: 340px; border: 0; background: #2e4a22; }
+	#shop { display: none; }
+	.link2 { cursor: pointer; }
+</style>
+
+<div style="padding:6px">Город (стенд)</div>
+<div class="link2" onclick="parent.zeige('markt')">Рынок</div>
+
+<div id="stadtlock" style="display:none"></div>
+<div id="shop">
+	<iframe id="shopframe" src="about:blank"></iframe>
+</div>
+
+<script>
+	// Игра показывает рамку магазина, когда в неё что-то грузят.
+	// Повторяем это же поведение, иначе помощник увидит скрытый кадр.
+	var _sf = document.getElementById('shopframe');
+
+	/*
+	 * ПОДМЕНА АДРЕСОВ — только на стенде.
+	 *
+	 * Помощник обязан ходить по НАСТОЯЩИМ путям игры (`/stadt/marktstand.php`),
+	 * иначе проверка ничего не докажет: подстроить продукт под стенд — это
+	 * лазейка, а не проверка. Поэтому подменяет стенд, а не код.
+	 */
+	var PODMENA = {
+		'/stadt/marktstand.php': 'stand-marktstand.html',
+		'/stadt/markt.php': 'stand-marktstand.html'
+	};
+
+	/*
+	 * ГОНКА, КОТОРУЮ СТЕНД ОБЯЗАН ВОСПРОИЗВОДИТЬ.
+	 *
+	 * На живой игре 2026-09-10 помощник записал адрес палатки в #shopframe,
+	 * а игра, дочитав свою страницу города, затёрла его обратно в
+	 * about:blank. Внешне: город открыт, кадр на месте, палатки нет, и
+	 * помощник ждёт впустую. Здесь мы делаем ровно это — один раз.
+	 * Без этого проверка зеленеет на коде, который на живой игре не работает.
+	 */
+	var _zatyorli = false;
+	setTimeout(function () {
+		if (_zatyorli) return;
+		_zatyorli = true;
+		if ((_sf.getAttribute('src') || 'about:blank') !== 'about:blank') {
+			_sf.setAttribute('src', 'about:blank');
+		}
+	}, 250);
+
+	new MutationObserver(function () {
+		var src = _sf.getAttribute('src');
+		if (!src || src === 'about:blank') return;
+		var put = src.split('?')[0];
+		if (PODMENA[put]) {
+			_sf.setAttribute('src', PODMENA[put]);   // вызовет наблюдателя ещё раз
+			return;
+		}
+		document.getElementById('shop').style.display = 'block';
+		document.getElementById('stadtlock').style.display = 'block';
+	}).observe(_sf, { attributes: true, attributeFilter: ['src'] });
+</script>

@@ -1,0 +1,254 @@
+<meta charset="utf-8">
+<title>Стенд: торговая палатка</title>
+<!--
+	Подделка `stadt/marktstand.php` — самой внутренней из трёх рамок.
+
+	Разметка и поведение сняты с ЖИВОЙ игры 2026-09-10 (тестовый аккаунт владельца, s5)
+	и доведены до конца настоящей продажей одной моркови с последующим
+	снятием. Разбор — `docs/game-api.md`, раздел «Рынок и торговая палатка».
+
+	ПРОДАЖА В ДВА ШАГА, и каждый шаг — ПЕРЕЗАГРУЗКА страницы:
+	  1. `form_prepare_markt` только ГОТОВИТ сделку. Сервер отвечает новой
+	     страницей с блоком комиссии и второй формой.
+	  2. `form_verkaufe_markt` подтверждает. Его кнопка называется
+	     `verkaufe_markt` со значением «O.K.», и значение уходит ТОЛЬКО при
+	     настоящем нажатии: `form.submit()` его не посылает, и сделка молча
+	     не состоится — проверено на живой игре.
+
+	Переходы здесь настоящие (`location.replace`), а не показ спрятанного
+	блока: ссылка на окно кадра после каждого шага устаревает, и код обязан
+	брать окно заново. Спрятанный блок этого бы не проверил.
+
+	СТЕНД НЕ ДОЛЖЕН БЫТЬ ДОБРЕЕ ИГРЫ — за это в проекте уже пять ложных
+	зелёных. Поэтому здесь нарочно:
+	  • ПУСТОЕ поле количества означает ВЕСЬ ЗАПАС. Ровно так живая игра
+	    выставила 163 моркови вместо одной, когда поле к моменту отправки
+	    оказалось пустым;
+	  • ценник при нажатии по товару ОЧИЩАЕТ поля — заполнять после;
+	  • скрытое поле зовётся `p_id` и хранит «p6», а не 6;
+	  • отправка шага 1 идёт через 300 мс, а не сразу;
+	  • у огурца (pid 12) на рынке нет предложений вовсе;
+	  • у салата (pid 2) самое дешёвое уже равно нижней границе коридора.
+-->
+<style>
+	body { margin: 0; font: 13px system-ui, sans-serif; background: #2e4a22; color: #eaf6e6; }
+	#sklad > div { width: 32px; height: 32px; background: #6a8f4a; border-radius: 4px; cursor: pointer; }
+	#preisschild, #gebuehrenDiv { display: none; }
+	#preisschild { margin: 8px; padding: 8px; background: #1b2b14; border-radius: 6px; }
+	#gebuehrenDiv { margin: 8px; padding: 8px; background: #3a2b14; border-radius: 6px; }
+	input[type=text] { width: 90px; }
+</style>
+
+<h3 style="margin:8px">Добро пожаловать в твою торговую палатку!</h3>
+
+<div id="sklad" style="position:absolute; top:60px; left:13px; width:345px; height:110px; overflow:auto"></div>
+
+<span class="tnormal" id="angeboteSpan">Предложения</span>
+<div id="angeboteDiv"></div>
+
+<!-- ШАГ 1: ценник -->
+<div id="preisschild" style="position:absolute; top:180px; left:13px">
+	<span class="thuge" id="produkt_titel">&nbsp;</span>
+	<form name="form_prepare_markt" action="/stadt/marktstand.php" method="POST">
+		<input type="hidden" id="produkt_max">
+		<input type="hidden" id="chosenobj" name="p_id">
+		<input type="text" name="p_anzahl" id="produkt_anzahl">
+		ед. (макс.: <span id="lbl_produkt_max"></span>)
+		<input type="text" name="p_preis1" id="produkt_preis1">,
+		<input type="text" name="p_preis2" id="produkt_preis2"> сТ
+		<input type="hidden" name="prepare_markt" value="true">
+		<input type="button" id="verkaufe_markt" class="msg_input link2" value="предложить на рынке">
+	</form>
+</div>
+
+<!-- ШАГ 2: комиссия и подтверждение.
+	Пусто нарочно: у ЖИВОЙ игры формы `form_verkaufe_markt` на обычной
+	странице палатки НЕТ вовсе, она приходит только со страницей комиссии.
+	Держать её в разметке всегда — значит быть добрее игры: код схватил бы
+	старую форму ещё до перехода и решил, что комиссия уже показана. -->
+<div id="gebuehrenDiv" style="position:absolute; top:250px; left:13px"></div>
+
+<form name="form_markt_anull" action="/stadt/marktstand.php" method="POST">
+	<input type="hidden" name="markt_anull_nr" value="">
+</form>
+
+<script>
+	var price_regulation_data = {
+		"2":  { "min": 0.02, "max": 0.24 },
+		"6":  { "min": 0.01, "max": 0.18 },
+		"12": { "min": 0.03, "max": 0.42 }
+	};
+	var t_currency = 'сТ';
+	var KOMISSIYA = 0.10;          // владелец рынка берёт 10 %, как в игре
+	var TOVARY = { 6: 'морковь', 2: 'салат', 12: 'огурец' };
+
+	// Склад и журналы живут в ВЕРХНЕМ окне: страница палатки перезагружается
+	// на каждом шаге, и всё, что лежало бы здесь, пропало бы.
+	function verh() { return window.parent.parent; }
+	var W = verh();
+	if (!W.__sklad) W.__sklad = { 6: 163, 2: 40, 12: 7 };
+	if (!W.__podgotovleno) W.__podgotovleno = [];   // что ушло на шаг 1
+	if (!W.__predlozheno) W.__predlozheno = [];     // что реально выставлено
+	if (!W.__vystavleno) W.__vystavleno = [];       // висящие предложения
+
+	function param(name) {
+		var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
+		return m ? decodeURIComponent(m[1]) : null;
+	}
+
+	// Склад рисуем из состояния — как это делает сервер при каждой отдаче.
+	(function () {
+		var box = document.getElementById('sklad'), html = '';
+		for (var pid in W.__sklad) {
+			if (!(W.__sklad[pid] > 0)) continue;
+			html += '<div class="v' + pid + '" id="p' + pid + '" title="' + TOVARY[pid] +
+				'" style="position:relative; float:left; margin:1px; z-index:0">' +
+				'<input type="hidden" id="anzahl_' + pid + '" value="' + W.__sklad[pid] + '"></div>';
+		}
+		box.innerHTML = html + '<div style="clear:both"></div>';
+	})();
+
+	(function () {
+		var s = '';
+		for (var i = 0; i < W.__vystavleno.length; i++) {
+			var v = W.__vystavleno[i];
+			s += v.skolko + ' ' + TOVARY[v.pid] + ' за штуку ' + v.cena + ' сТ ';
+		}
+		document.getElementById('angeboteDiv').textContent = s;
+	})();
+
+	function versteckePreisschild() {
+		document.getElementById('preisschild').style.display = 'none';
+	}
+
+	// Повторяет игру дословно, включая ОЧИСТКУ полей.
+	function zeigePreisschild(element) {
+		if (element) {
+			var pid = element.id.substring(1);
+			document.getElementById('chosenobj').value = element.id;   // «p6», не 6
+			document.getElementById('produkt_titel').innerHTML = element.title;
+			document.getElementById('produkt_anzahl').value = '';
+			document.getElementById('produkt_preis1').value = '0';
+			document.getElementById('produkt_preis2').value = '00';
+			document.getElementById('produkt_max').value = document.getElementById('anzahl_' + pid).value;
+			document.getElementById('lbl_produkt_max').innerHTML = document.getElementById('anzahl_' + pid).value;
+		}
+		document.getElementById('preisschild').style.display = 'block';
+	}
+
+	for (var pid in W.__sklad) {
+		(function (el) {
+			if (el) el.addEventListener('click', function () { zeigePreisschild(el); });
+		})(document.getElementById('p' + pid));
+	}
+
+	// ── ШАГ 1: подготовка. Игра гасит ценник и уходит на новую страницу. ──
+	document.getElementById('verkaufe_markt').addEventListener('click', function () {
+		versteckePreisschild();
+		setTimeout(function () {
+			var f = document.forms['form_prepare_markt'];
+
+			/*
+			 * РЕЖИМ «ИГРА ТЕРЯЕТ КОЛИЧЕСТВО» (?rynok_teryaet_kolichestvo=1).
+			 * Воспроизводит инцидент живой игры 2026-09-10: к моменту
+			 * отправки поле оказалось пустым, и сервер выставил ВЕСЬ запас —
+			 * 163 моркови вместо одной. Флаг читаем у верхнего окна:
+			 * страница палатки грузится по своему адресу, без запроса.
+			 */
+			if (/[?&]rynok_teryaet_kolichestvo=1/.test(W.location.search)) {
+				f.p_anzahl.value = '';
+			}
+
+			var pid = String(f.p_id.value).replace(/^p/, '');
+			var zapas = W.__sklad[pid] || 0;
+
+			/*
+			 * ОПАСНОЕ МЕСТО, ВОСПРОИЗВЕДЁННОЕ НАРОЧНО.
+			 * Пустое количество живая игра поняла как «весь запас» и
+			 * выставила 163 моркови вместо одной. Стенд обязан вести себя
+			 * так же, иначе проверка не поймает эту потерю.
+			 */
+			var skolko = parseInt(f.p_anzahl.value, 10);
+			if (!(skolko > 0)) skolko = zapas;
+
+			/*
+			 * РЕЖИМ «ИГРА ПОНЯЛА ИНАЧЕ» (?rynok_menyaet_kolichestvo=1).
+			 *
+			 * Отдельно от режима выше. Тот воспроизводит сам инцидент —
+			 * пустое поле, — но помощник продаёт ВЕСЬ запас, и пустое поле
+			 * даёт то же число: расхождения не будет. Здесь количество
+			 * меняется на заведомо другое, чтобы проверить саму защиту:
+			 * помощник обязан отказаться и ничего не подтверждать.
+			 */
+			if (/[?&]rynok_menyaet_kolichestvo=1/.test(W.location.search)) {
+				skolko = Math.max(1, Math.floor(skolko / 2));
+			}
+
+			W.__podgotovleno.push({
+				p_id: f.p_id.value, skolko: skolko,
+				preis1: f.p_preis1.value, preis2: f.p_preis2.value
+			});
+
+			location.replace('stand-marktstand.html?shag=2&pid=' + pid + '&n=' + skolko +
+				'&p1=' + encodeURIComponent(f.p_preis1.value) +
+				'&p2=' + encodeURIComponent(f.p_preis2.value));
+		}, 300);
+	});
+
+	// ── ШАГ 2: комиссия. Показываем её и ждём настоящего нажатия. ──
+	/*
+	 * РЕЖИМ «КАДР ЗАСТРЯЛ НА КОМИССИИ» (?rynok_zastryal_na_komissii=1).
+	 *
+	 * Так выглядит палатка, если сделку подготовили и ушли, не подтвердив.
+	 * На живой игре 2026-09-10 помощник принял такую страницу за палатку и
+	 * встал: заполнять на ней нечего. Показываем это один раз — дальше
+	 * страница обычная, чтобы помощник мог выправиться перезагрузкой.
+	 */
+	var zastryal = false;
+	if (/[?&]rynok_zastryal_na_komissii=1/.test(W.location.search) &&
+		!param('shag') && !param('prodano') && !W.__zastryal_pokazan) {
+		W.__zastryal_pokazan = true;
+		zastryal = true;
+	}
+
+	if (param('shag') === '2' || zastryal) {
+		var pid2 = param('pid') || '6', n2 = parseInt(param('n') || '5', 10);
+		var p1 = param('p1') || '0', p2 = param('p2') || '09';
+
+		/*
+		 * НА СТРАНИЦЕ КОМИССИИ ЦЕННИКА НЕТ.
+		 * У живой игры `#preisschild` там остаётся, а полей внутри него —
+		 * нет. Именно поэтому «есть #preisschild» не значит «палатка готова
+		 * принять предложение», и стенд обязан это повторять.
+		 */
+		document.getElementById('preisschild').innerHTML = '';
+		var cena = parseFloat(p1 + '.' + p2);
+		// Форму рисуем ТОЛЬКО здесь — как это делает сервер игры.
+		document.getElementById('gebuehrenDiv').innerHTML =
+			'<span id="gebuehrenText">Владелец рынка требует 10,0% комиссионных за ' +
+			'выбранный товар. Твой товар: ' + n2 + ' ' + TOVARY[pid2] + ' по ' +
+			p1 + ',' + p2 + ' сТ/шт. Комиссионные за этот товар: ' +
+			(n2 * cena * KOMISSIYA).toFixed(2).replace('.', ',') + ' сТ.</span>' +
+			'<form name="form_verkaufe_markt" action="/stadt/marktstand.php" method="POST">' +
+			'<input type="hidden" name="p_anzahl" id="ok_anzahl" value="' + n2 + '">' +
+			'<input type="hidden" name="p_preis1" id="ok_preis1" value="' + p1 + '">' +
+			'<input type="hidden" name="p_preis2" id="ok_preis2" value="' + p2 + '">' +
+			'<input type="hidden" name="p_id" id="ok_id" value="' + pid2 + '">' +
+			'<input type="submit" name="verkaufe_markt" value="O.K." id="ok_knopka">' +
+			'</form>';
+		document.getElementById('gebuehrenDiv').style.display = 'block';
+
+		// Значение кнопки уходит только при настоящем нажатии.
+		document.getElementById('ok_knopka').addEventListener('click', function (e) {
+		e.preventDefault();
+		var pid = document.getElementById('ok_id').value;
+		var skolko = parseInt(document.getElementById('ok_anzahl').value, 10);
+		var c1 = document.getElementById('ok_preis1').value;
+		var c2 = document.getElementById('ok_preis2').value;
+		W.__sklad[pid] = Math.max(0, (W.__sklad[pid] || 0) - skolko);
+		W.__predlozheno.push({ p_id: 'p' + pid, skolko: String(skolko), preis1: c1, preis2: c2 });
+		W.__vystavleno.push({ pid: pid, skolko: skolko, cena: c1 + ',' + c2 });
+			location.replace('stand-marktstand.html?prodano=1');
+		});
+	}
+</script>

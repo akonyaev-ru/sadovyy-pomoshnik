@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Стенд: фрейм «сад»</title>
+<style>
+	body { background:#1d4d2a; color:#cfe; font:12px system-ui; margin:0; padding:8px; }
+	#g { display:grid; grid-template-columns:repeat(17, 14px); gap:1px; }
+	#g img { width:14px; height:14px; background:#4a8; display:block; }
+</style>
+
+<p>фрейм «сад» (подделка)</p>
+<div id="g"></div>
+
+<script>
+	// Внутри фрейма — набор игры образца 2012 года.
+	// Проверяем, что верхнее окно дотянется сюда и опишет этот контекст,
+	// а сам фрейм при этом НЕ нарисует вторую панель.
+	window.garten_prod = { 1: 'морковь', 2: 'огурец' };
+	window.garten_kategorie = { 1: 'v', 2: 'v' };
+	window.cache_me = function (id, prod, kat) { };
+	window.show_built = function (id, mode) { };
+	window.selectMode = function (m, a, b) { };
+
+	var g = document.getElementById('g');
+	for (var i = 1; i <= 204; i++) {
+		var img = document.createElement('img');
+		img.id = 'b' + i;
+		img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+		g.appendChild(img);
+	}
+</script>
+
+<!-- Tampermonkey внедряет скрипт в КАЖДЫЙ фрейм — воспроизводим это,
+     но только в режиме ?auto=1 у верхней страницы.
+     Разведчик должен здесь молча выйти, увидев, что верхнее окно доступно. -->
+<script>
+	var auto = false;
+	try { auto = /[?&]auto=1/.test(parent.location.search); } catch (e) { }
+	if (auto) {
+		document.write('<scr' + 'ipt src="../src/razvedka.user.js"><\/scr' + 'ipt>');
+	}
+</script>

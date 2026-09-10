@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Стенд: подделка игры для проверки разведчика</title>
+<style>
+	body { background:#20303d; color:#cfe; font:14px system-ui; margin:0; padding:16px; }
+	h1 { font-size:15px; margin:0 0 10px; }
+	#garden { display:grid; grid-template-columns:repeat(17, 22px); gap:1px; }
+	#garden img { width:22px; height:22px; background:#3c6; display:block; }
+	p { max-width:600px; color:#9ab; }
+</style>
+
+<h1>Стенд: поддельная «Садовая империя»</h1>
+<p>Здесь нет настоящей игры. Объекты ниже подделаны по образцу
+	<code>Anbauhelfer</code>, чтобы проверить, что разведчик их находит,
+	не падает и рисует читаемый отчёт.</p>
+
+<div id="garden"></div>
+
+<p>Ниже — фрейм с набором объектов образца 2012 года. Верхнее окно должно его
+	осмотреть и описать, а второй панели появиться не должно.</p>
+<iframe name="garten" src="stand-frame.html" style="width:420px;height:180px;border:1px solid #2ea3a8"></iframe>
+
+<script>
+	// ── поддельные объекты игры (то, что ищет разведчик) ──────────────
+	window.ajax = {
+		request: function (url, data, handler) { },
+		post: function () { },
+		busy: false
+	};
+	window.ajaxRequest = function (a, b, c, d) {
+		// подделка: настоящая функция игры шлёт запрос, эта ничего не делает
+		return null;
+	};
+	window.data_products = { 1: { name: 'Морковь' }, 2: { name: 'Огурец' }, 3: { name: 'Пшеница' } };
+	window.waehleGarten = function (n) { };
+	window.watergarden = { active: false, id: 6 };
+	window.gardenId = 1;
+	window.maxGarden = 5;
+
+	// шум, который должен попасть в раздел «прочие глобальные имена»
+	window.someGameHelper = function () { };
+	window.regal = { produkte: {}, getProductInfos: function () { } };
+
+	// ── сетка сада 17 × 12 = 204 клетки, как в коде 2012 года ─────────
+	var g = document.getElementById('garden');
+	for (var i = 1; i <= 204; i++) {
+		var img = document.createElement('img');
+		img.id = 'b' + i;
+		img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+		// каждой третьей клетке подделаем «можно действовать»
+		if (i % 3 === 0) img.setAttribute('data-src-hint', '/cursors/water.gif');
+		g.appendChild(img);
+	}
+</script>
+
+<!-- Проверяемый скрипт грузим только при ?auto=1 — это режим «как Tampermonkey».
+     Без параметра страница остаётся чистой: так проверяется вариант с закладкой. -->
+<script>
+	if (/[?&]auto=1/.test(location.search)) {
+		document.write('<scr' + 'ipt src="../src/razvedka.user.js"><\/scr' + 'ipt>');
+	}
+</script>

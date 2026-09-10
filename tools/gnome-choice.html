@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Выбор гнома вместо солнца</title>
+<style>
+	body { margin:0; padding:16px; background:#4b7a33; font:13px system-ui; color:#fff; }
+	h1 { font-size:15px; margin:0 0 4px }
+	p  { margin:0 0 14px; color:#dbf0cf }
+	.row { display:flex; flex-wrap:wrap; gap:18px; align-items:flex-end; }
+	figure { margin:0; text-align:center; width:120px; }
+	figure img { display:block; margin:0 auto 6px; }
+	figcaption { font-size:11px; color:#eaffe0; word-break:break-all; line-height:1.3 }
+	.strip { background:#5d8f3d; padding:10px; border-radius:5px; }
+</style>
+
+<h1>Кандидаты вместо солнца</h1>
+<p>Все — картинки самой игры. Фон подобран под траву нижней полосы.</p>
+
+<div class="row strip" id="row"></div>
+
+<script>
+	var CDN = 'https://wurzelimperium.wavecdn.net/pics/';
+	var cand = [
+		'verkauf/sonne.gif',            // что стоит сейчас
+		'verkauf/forscherzwerg.gif',    // занят под «выгоду»
+		'verkauf/sensenzwerg.gif',
+		'herb/gnome.png',
+		'herb/interface_element_zwerg.png',
+		'booster/boostzwerg.png',
+		'garten/forscherzwerg.gif',
+		'wassergarten/questzwerg_klein.png',
+		'wassergarten/boosterzwerg_klein.png',
+		'wassergarten/algenzwerg_klein.png',
+		'wassergarten/unkrauthelfer.gif',
+		'gilde2/tooltip_questzwerg.gif'
+	];
+	var row = document.getElementById('row');
+	cand.forEach(function (p) {
+		var f = document.createElement('figure');
+		var i = document.createElement('img');
+		i.src = CDN + p;
+		i.onerror = function () { f.style.opacity = '.3'; c.textContent += ' — НЕТ'; };
+		i.onload = function () { c.textContent = p + ' (' + i.naturalWidth + '×' + i.naturalHeight + ')'; };
+		var c = document.createElement('figcaption');
+		c.textContent = p;
+		f.appendChild(i); f.appendChild(c); row.appendChild(f);
+	});
+</script>

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Садовый помощник
 // @namespace    si-helper
-// @version      3.10.1
+// @version      3.11.0
 // @description  Кнопки-помощники внутри игры. Действует только по нажатию.
 // @match        https://*.molehillempire.com/*
 // @match        https://*.sadowajaimperija.ru/*

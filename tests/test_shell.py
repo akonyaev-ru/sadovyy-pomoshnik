@@ -431,3 +431,25 @@ def test_only_one_helper_takes_the_lock():
     assert app.take_single_run(imya) is False, "второй запуск занял замок повторно"
     # Другое имя — другой замок, мешать не должен.
     assert app.take_single_run(imya + "-drugoe") is True
+
+
+def test_version_flag_answers_and_does_not_touch_the_log(tmp_path, monkeypatch, capsys):
+    """`--version` отвечает в поток вывода и НЕ трогает журнал.
+
+    Файл раздаётся страницей релиза, и «та ли версия скачалась» надо уметь
+    спросить у самого файла. Ответ обязан идти в командную строку: у
+    программы нет консоли, и `setup_output()`, не найдя её, уводит весь
+    вывод в журнал — ответ уходил бы туда же, затирая журнал работающего
+    помощника. Поэтому проверка следит и за порядком.
+    """
+    from si_helper import __version__
+
+    zhurnal = tmp_path / "помощник.log"
+    monkeypatch.setattr(app, "log_path", lambda: zhurnal)
+
+    code = app.main(["--version"])
+    assert code == 0
+    vyvod = capsys.readouterr().out
+    assert __version__ in vyvod, f"версии нет в ответе: {vyvod!r}"
+    assert "Садовый помощник" in vyvod
+    assert not zhurnal.exists(), "журнал тронут, хотя просили только версию"

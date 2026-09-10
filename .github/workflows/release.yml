@@ -1,0 +1,80 @@
+# Выпуск по тегу.
+#
+# Зачем это здесь. Первый релиз я собрал руками у себя на машине — причём в
+# тот момент, когда был запущен помощник и заблокирована рабочая копия. Файл
+# оказался верным, но проверить это можно было только сверкой хешей: из тега
+# его не воспроизвёл бы никто, включая меня. Теперь сборку делает чистая
+# машина из ровно того коммита, на который указывает тег.
+#
+# Порядок намеренный: сперва проверки, потом сборка, потом проверки СОБРАННОГО
+# файла — и только после этого публикация. Красное на любом шаге означает, что
+# релиза не будет.
+#
+# Описание релиза пустое: так принято в соседнем проекте Hunter CLI, и владелец
+# просил так же. Что нового — видно по коммитам и тегу.
+#
+# Как выпускать:
+#     правим версию в src/si_helper/__init__.py и в шапке src/panel.js
+#     git commit -am "3.11.0 — …"
+#     git tag v3.11.0        # лёгкий тег, без -a
+#     git push origin master v3.11.0
+
+name: Выпуск
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  vypusk:
+    runs-on: windows-latest
+
+    steps:
+      - name: Забрать исходники
+        uses: actions/checkout@v4
+
+      - name: Поставить Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Поставить зависимости
+        run: python -m pip install --upgrade pip -r requirements.txt
+
+      - name: Сверить версию с тегом
+        shell: pwsh
+        run: |
+          $teg = "${{ github.ref_name }}" -replace '^v', ''
+          $vers = (python -c "import sys; sys.path.insert(0,'src'); from si_helper import __version__; print(__version__)").Trim()
+          Write-Output "тег: $teg | версия в коде: $vers"
+          if ($teg -ne $vers) {
+            Write-Error "Версия в коде ($vers) не совпадает с тегом ($teg). Выпуск остановлен."
+            exit 1
+          }
+
+      - name: Проверки на подделке игры
+        run: python -m pytest -q
+
+      - name: Собрать
+        run: python tools/build.py
+
+      - name: Проверить собранный файл
+        shell: pwsh
+        run: python tools/check_exe.py "dist/Садовый помощник.exe"
+
+      - name: Приготовить файл для выкладки
+        shell: pwsh
+        # Имя без версии: версия живёт в теге релиза, дублировать её в имени
+        # файла незачем. Латиницей — кириллицу с пробелом GitHub коверкает.
+        run: Copy-Item "dist/Садовый помощник.exe" "dist/Sadovyy-pomoshnik.exe"
+
+      - name: Опубликовать
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Описание пустое намеренно — `--notes ""`.
+        run: gh release create "${{ github.ref_name }}" "dist/Sadovyy-pomoshnik.exe" --notes ""

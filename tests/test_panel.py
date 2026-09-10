@@ -178,7 +178,7 @@ def test_no_dangerous_side_effects(game):
 
 
 def test_mode_is_restored(game):
-    """Режим игры возвращается на место — иначе следующий клик мамы польёт."""
+    """Режим игры возвращается на место — иначе следующий клик игрока польёт."""
     before = game.evaluate("window.mode")
     _press(game, "water")
     _wait(game, "/Полито|нечего|политы/.test(" + _status_expr() + ")", "полив не завершился")

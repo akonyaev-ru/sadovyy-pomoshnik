@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Садовый помощник
 // @namespace    si-helper
-// @version      3.10.0
+// @version      3.10.1
 // @description  Кнопки-помощники внутри игры. Действует только по нажатию.
 // @match        https://*.molehillempire.com/*
 // @match        https://*.sadowajaimperija.ru/*
@@ -1314,7 +1314,7 @@
 			// 1. Быстрая навигация самой игры. Данные в ней есть даже тогда,
 			//    когда рисовать их некуда: игра кладёт `quicknavi.data` до
 			//    вызова `build()`, а `build()` молча выходит, если на
-			//    странице нет блока `#quicknavi`. Это и есть случай мамы.
+			//    странице нет блока `#quicknavi`. Это и есть тот самый случай.
 			try {
 				var q = window.quicknavi;
 				if (q && q.data) {

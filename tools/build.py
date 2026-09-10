@@ -76,15 +76,35 @@ def main() -> int:
         shutil.rmtree(work, ignore_errors=True)
         return 1
 
+    """Рабочая копия — удобство, а не обязанность.
+
+    Если помощник сейчас запущен, Windows держит его файл, и `unlink` падает
+    с «Отказано в доступе». Раньше на этом валилась ВСЯ сборка, хотя копия в
+    `dist/` — та, которую отдают, — легла бы прекрасно. За один день это
+    остановило работу трижды, причём дважды я после этого прогонял проверки
+    против СТАРОГО файла и видел зелёное. Теперь занятая рабочая копия — это
+    предупреждение, а не отказ.
+    """
     out_dir = OUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / built.name
-    if target.exists():
-        target.unlink()
-    shutil.copy2(built, target)
+    rabochaya_legla = True
+    try:
+        if target.exists():
+            target.unlink()
+        shutil.copy2(built, target)
+    except OSError as exc:
+        rabochaya_legla = False
+        print(f"  рабочую копию обновить не вышло: {exc.__class__.__name__} — "
+              "похоже, помощник сейчас запущен.")
+        print("  Это не беда: копия в dist/ ниже — свежая. Но ПОМНИТЕ:")
+        print("  `check_exe.py` без аргумента проверяет именно рабочую копию,")
+        print("  то есть СТАРУЮ. Проверять надо так:")
+        print(f'      python tools/check_exe.py "dist/{built.name}"')
 
-    print(f"готово: {target.name}, {target.stat().st_size / 1_048_576:.1f} МБ")
-    print(f"  рабочая копия: {target}")
+    print(f"готово: {built.name}, {built.stat().st_size / 1_048_576:.1f} МБ")
+    if rabochaya_legla:
+        print(f"  рабочая копия: {target}")
 
     placed = place_in_project(built)
     shutil.rmtree(work, ignore_errors=True)

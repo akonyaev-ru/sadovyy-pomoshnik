@@ -152,7 +152,7 @@ def test_payload_strips_userscript_header():
 def test_program_delivers_working_recon(chrome, stand_server):
     """Сквозная проверка: программа доставляет разведчика, он работает.
 
-    Это то, что уйдёт маме первым: она запускает файл, заходит в игру и
+    Это то, что уйдёт игроку первым: он запускает файл, заходит в игру и
     видит панель с отчётом. Если проверка красная — отправлять нечего.
     """
     chrome.inject_on_every_load(payload.load("razvedka.user.js"))

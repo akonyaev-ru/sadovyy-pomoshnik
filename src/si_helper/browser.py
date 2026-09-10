@@ -342,7 +342,7 @@ def launch(
         f"--remote-debugging-port={port}",
         f"--user-data-dir={prof}",
         # Без этого Chrome при первом запуске показывает мастер настройки и
-        # предложение войти в аккаунт — маме это ни к чему.
+        # предложение войти в аккаунт — игроку это ни к чему.
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=Translate",

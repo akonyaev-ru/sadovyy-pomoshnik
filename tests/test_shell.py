@@ -667,3 +667,80 @@ def test_console_tools_never_open_a_window(monkeypatch):
         assert utilita in imena, f"вызов {utilita} не дошёл до subprocess: {vyzovy}"
     s_oknom = [c for c, f in vyzovy if not (f & browser.BEZ_OKNA)]
     assert not s_oknom, f"эти вызовы откроют окно: {s_oknom}"
+
+
+# ── работа вслепую: игрок ничего не присылает, программа объясняет себя окном ──
+
+
+def _okna(monkeypatch):
+    okna = []
+    monkeypatch.setattr(app, "show_error", lambda text: okna.append(("error", text)))
+    monkeypatch.setattr(app, "show_wait", lambda text: okna.append(("wait", text)))
+    monkeypatch.setattr(app, "show_note", lambda text: okna.append(("note", text)))
+    monkeypatch.setattr(app, "_say", lambda text="": None)
+    return okna
+
+
+def test_second_launch_brings_the_game_forward_instead_of_an_error(monkeypatch):
+    """Повторный щелчок по значку — не ошибка: показываем окно игры и выходим."""
+    okna = _okna(monkeypatch)
+    monkeypatch.setattr(app.browser, "upjers_running", lambda: [4242])
+    monkeypatch.setattr(app.browser, "show_app_window", lambda pids, title_part="upjers": "vpered")
+    assert app._vtoroy_zapusk() == 0
+    assert okna == [], f"окно игры вывели вперёд — говорить больше нечего: {okna}"
+
+
+def test_second_launch_explains_the_tray(monkeypatch):
+    """Окно игры в трее — говорим словами, где его открыть, и ждём нажатия."""
+    okna = _okna(monkeypatch)
+    monkeypatch.setattr(app.browser, "upjers_running", lambda: [4242])
+    monkeypatch.setattr(app.browser, "show_app_window", lambda pids, title_part="upjers": "v-tree")
+    assert app._vtoroy_zapusk() == 0
+    assert [o[0] for o in okna] == ["wait"], okna
+    assert "у часов" in okna[0][1]
+
+
+def test_second_launch_without_the_game_asks_for_a_reboot(monkeypatch):
+    """Помощник завис, игры нет — единственный понятный совет: перезагрузка."""
+    okna = _okna(monkeypatch)
+    monkeypatch.setattr(app.browser, "upjers_running", lambda: [])
+    assert app._vtoroy_zapusk() == 0
+    assert [o[0] for o in okna] == ["wait"], okna
+    assert "Перезагрузите" in okna[0][1]
+
+
+def test_main_routes_a_second_launch_to_the_gentle_path(monkeypatch):
+    """`main()` при занятом замке идёт в `_vtoroy_zapusk`, а не в ошибку."""
+    okna = _okna(monkeypatch)
+    monkeypatch.setattr(app, "setup_output", lambda: None)
+    monkeypatch.setattr(app, "take_single_run", lambda name="": False)
+    monkeypatch.setattr(app, "_vtoroy_zapusk", lambda: 42)
+    assert app.main([]) == 42
+    assert okna == []
+
+
+def test_login_reminder_comes_once_after_a_minute_without_the_game(monkeypatch):
+    """Игра не открылась за минуту — одна подсказка «войдите как обычно»."""
+    okna = _okna(monkeypatch)
+    t0 = 1000.0
+    now = {"t": t0}
+    monkeypatch.setattr(app.time, "monotonic", lambda: now["t"])
+    states = {"a": "страница без игры: ru.upjers.com"}
+
+    assert app._napomnit_vhod(states, t0, False) is False        # рано
+    now["t"] = t0 + app.VHOD_ZHDAT_S + 1
+    assert app._napomnit_vhod(states, t0, False) is True         # пора
+    assert [o[0] for o in okna] == ["note"] and "Войдите" in okna[0][1]
+    assert app._napomnit_vhod(states, t0, True) is True          # второй раз не напоминаем
+    assert len(okna) == 1
+
+
+def test_login_reminder_stays_silent_when_the_game_is_seen(monkeypatch):
+    """Игра замечена — хоть спрятан, хоть ждёт — подсказка не нужна."""
+    okna = _okna(monkeypatch)
+    now = {"t": 5000.0}
+    monkeypatch.setattr(app.time, "monotonic", lambda: now["t"])
+    for state in ("в саду; гномов 4", "спрятан: город", "жду игру (объектов игры на странице ещё нет)"):
+        states = {"a": "страница без игры: ru.upjers.com", "b": state}
+        assert app._napomnit_vhod(states, 0.0, False) is False, state
+    assert okna == []

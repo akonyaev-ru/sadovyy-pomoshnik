@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Садовый помощник
 // @namespace    si-helper
-// @version      2026.3
+// @version      2026.4
 // @description  Кнопки-помощники внутри игры. Действует только по нажатию.
 // @match        https://*.molehillempire.com/*
 // @match        https://*.sadowajaimperija.ru/*
@@ -1286,6 +1286,33 @@
 		var btnWater = gnomeButton('water', 'pics/verkauf/kannenzwerg.gif', 25, 45,
 			'Полить всё', runWatering);
 
+		/*
+		 * ═══ ЖУК ДОЛЖЕН БЫТЬ ОДИН ═══════════════════════════════════
+		 *
+		 * У игры ЕСТЬ свой автомат посадки — `#wimpareaAutoplant`, она рисует
+		 * его фоном в верхней строке (проверено на живой игре 2026-09-11:
+		 * `onclick="gardenjs.autoplantOpen('v')"`). Пока мы рисовали такого
+		 * же своего ниже, у игрока было ДВА жука — он прислал снимок и
+		 * сказал: «должен быть один, у гнома сверху».
+		 *
+		 * Решение: разметку игры НЕ ТРОГАЕМ (её обработчик, её картинка), а
+		 * свою кнопку превращаем в ПРОЗРАЧНУЮ НАКЛАДКУ ровно поверх её жука.
+		 * Видимый жук один — её; нажатие ловим мы и сажаем своим способом,
+		 * бесплатно. Платный автомат игры работает на ПОКУПАЕМЫХ зарядах, и
+		 * тратить их молча нельзя — накладка до него нажатие не пускает.
+		 *
+		 * Нет у игры своего жука (бывает на других уровнях) — рисуем своего,
+		 * как раньше: возможность посадки не должна пропадать.
+		 */
+		var PROZRACHNAYA = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+		function zhukIgry() {
+			var e = document.getElementById('wimpareaAutoplant');
+			if (!e) return null;
+			var r = e.getBoundingClientRect();
+			return (r.width && r.height) ? e : null;
+		}
+
 		var btnPlant = gnomeButton('plant', 'pics/verkauf/anpflanzautomat.gif', 45, 45,
 			'Посадить выбранные семена', runPlanting);
 
@@ -1751,8 +1778,6 @@
 		 * этом честно пишет подсказкой.
 		 */
 		var WIMP_BOX = 'si-wimp';
-		var wimpSheets = {};        // листки, пойманные с сервера
-		var wimpCurrent = null;     // какой открыт сейчас
 		var wimpListTop = null;     // родное положение списка игры
 
 		function escText(s) {
@@ -1769,69 +1794,76 @@
 		}
 
 		/*
-		 * Бонус к сумме считаем ТЕМ ЖЕ способом, что игра. Иначе процент
-		 * оказался бы посчитан не от того числа, которое игрок видит в
-		 * строке «Сумма», и блок бы врал.
+		 * Деньги игры словами: `formatMoney` собирает их через `number_format`
+		 * с разделителями из `t_price` — [1] дробная часть, [3] тысячи.
+		 * Разбираем ТЕМИ ЖЕ разделителями, иначе «2.050,03 сТ» прочиталось бы
+		 * как 2,05. Не смогли — возвращаем null и честно молчим.
 		 */
-		function wimpBonusShare() {
-			var g = 0;
-			try {
-				var sb = window.specialbonus;
-				if (sb && sb.data) {
-					if (sb.data.wimps && sb.data.wimps.money) g += sb.data.wimps.money;
-					if (sb.data.normalwimps && sb.data.normalwimps.money
-						&& window.currentGarden != 101) g += sb.data.normalwimps.money;
-				}
-				var b = window.birds;
-				if (b && b.data && b.data.data && b.data.data.bonus
-					&& b.data.data.bonus.type === 'money' && b.data.data.bonus.remain > 0) {
-					g += b.data.data.bonus.config.amount;
-				}
-			} catch (e) { /* бонусов нет — значит их и нет */ }
-			return g;
+		function parseMoney(text) {
+			if (!text) return null;
+			var tp = window.t_price || [];
+			var drob = tp[1] || ',', tys = tp[3] || '.';
+			var s = String(text).replace(/\u00a0/g, ' ');
+			var m = /[\d][\d\s.,\u00a0]*/.exec(s);
+			if (!m) return null;
+			s = m[0];
+			s = s.split(tys).join('').split(' ').join('');
+			s = s.split(drob).join('.');
+			var v = parseFloat(s);
+			return isFinite(v) ? v : null;
 		}
 
+		// Имя товара → его номер. Игра рисует в листке имена, а цена лежит по
+		// номеру, поэтому держим обратный справочник и пересобираем его,
+		// когда игра досылает товары.
+		var imenaPid = null, imenaSkolko = -1;
+
+		function pidPoImeni(name) {
+			var dp = window.data_products || {};
+			var n = 0, k;
+			for (k in dp) n++;
+			if (!imenaPid || n !== imenaSkolko) {
+				imenaPid = {};
+				for (k in dp) {
+					if (dp[k] && dp[k].name && !(dp[k].name in imenaPid)) imenaPid[dp[k].name] = k;
+				}
+				imenaSkolko = n;
+			}
+			return imenaPid[name];
+		}
+
+		/*
+		 * ══ ВЫГОДНОСТЬ В ЛИСТКЕ ПОПРОШАЙКИ ═════════════════════════
+		 *
+		 * Так это было у CupIvan (`functions/simpList.js`): своего окна нет,
+		 * выгодность дописывается в тот самый листок, где игрок и решает —
+		 * отдавать товар или нет.
+		 *
+		 * ЧИТАЕМ ТО, ЧТО ИГРА УЖЕ НАРИСОВАЛА, А НЕ ОТВЕТ СЕРВЕРА.
+		 * Иван перехватывал `verkaufajax` + `do:getData`. На живой игре
+		 * 2026-09-11 выяснилось: этот запрос НЕ ВЫЗЫВАЕТСЯ ВОВСЕ — листки
+		 * приходят вместе с садом. Расчёт, ждавший ответа, не появлялся у
+		 * игрока никогда. В самом листке есть всё нужное: строки вида
+		 * «33 x Медуница», цвет строки (`blau` хватает / `rot` нет) и сумма
+		 * в `#wimpVerkaufSumAmount` — причём УЖЕ С БОНУСОМ игры, ровно то
+		 * число, которое видит человек. Номер товара берём по имени из
+		 * `data_products`, цену — оттуда же.
+		 *
+		 * С ЧЕМ СРАВНИВАЕМ: с ценой самой игры (`data_products[pid].price`) —
+		 * её собственной оценкой товара. **Цен рынка здесь нет**: на странице
+		 * сада их не бывает, а ходить за ними в город самим — работа без
+		 * игрока, чего мы не делаем (АС-7). Блок пишет об этом подсказкой.
+		 */
 		function hookWimps() {
-			// 1. Листок приходит ответом сервера — запоминаем его себе.
-			var aj = window.ajax;
-			if (aj && typeof aj.request === 'function' && !aj.siHooked) {
-				var realRequest = aj.request;
-				aj.request = function (url, data, handler) {
-					if (url === 'verkaufajax' && data && data['do'] === 'getData'
-						&& typeof handler === 'function') {
-						var inner = handler;
-						handler = function (resp) {
-							try {
-								if (resp && resp.id != null) wimpSheets[resp.id] = resp;
-							} catch (e) { /* чужой ответ — просто пропускаем */ }
-							return inner.apply(this, arguments);
-						};
-					}
-					return realRequest.call(this, url, data, handler);
-				};
-				aj.siHooked = true;
-			}
-
-			// 2. Какой листок открыт. Без этого мы не узнаём показы из кэша
-			//    игры, а их большинство: на сервер она ходит один раз.
-			var wa = window.wimparea;
-			if (wa && typeof wa.show === 'function' && !wa.siHooked) {
-				var realShow = wa.show;
-				wa.show = function (id) {
-					wimpCurrent = id;
-					return realShow.apply(this, arguments);
-				};
-				wa.siHooked = true;
-			}
-
-			// 3. Игра перерисовала список — дорисовываем своё. Наш блок лежит
-			//    СОСЕДОМ, а не внутри списка, иначе наблюдатель звал бы сам себя.
+			// Игра перерисовала список — дорисовываем своё. Наш блок лежит
+			// СОСЕДОМ, а не внутри списка, иначе наблюдатель звал бы сам себя.
 			var list = document.getElementById('wimpVerkaufProducts');
 			if (list && !list.siWatched && typeof window.MutationObserver === 'function') {
 				try {
 					new window.MutationObserver(function () { drawWimpProfit(); })
 						.observe(list, { childList: true });
 					list.siWatched = true;
+					drawWimpProfit();      // листок мог быть открыт до нас
 				} catch (e) { /* без наблюдателя блок просто не появится */ }
 			}
 		}
@@ -1842,42 +1874,36 @@
 
 			var old = document.getElementById(WIMP_BOX);
 			if (old && old.parentNode) old.parentNode.removeChild(old);
-			if (!host || !list) return;
+			if (!host || !list || !list.children.length) return;
 
-			/*
-			 * Листка может не быть: если помощник встал ПОСЛЕ того, как игрок
-			 * уже открывал этого попрошайку, игра возьмёт свой кэш и на сервер
-			 * не пойдёт — ловить будет нечего. Тогда молчим: выдумывать числа
-			 * рядом с настоящими нельзя.
-			 */
-			var sheet = (wimpCurrent !== null) ? wimpSheets[wimpCurrent] : null;
-			if (!sheet || !sheet.products || !sheet.products.length) return;
+			var value = 0, known = true, missing = [], i;
+			var shelf = window.regal, products = window.data_products || {};
 
-			var products = window.data_products || {};
-			var shelf = window.regal;
-			var value = 0, known = true, missing = [], i, item, info, have;
+			for (i = 0; i < list.children.length; i++) {
+				var stroka = (list.children[i].textContent || '').trim();
+				var m = /^(\d+)\s*[x\u0445\u00d7]\s*(.+)$/i.exec(stroka);
+				if (!m) continue;
+				var amount = parseInt(m[1], 10);
+				var name = m[2].trim();
+				var pid = pidPoImeni(name);
+				var info = pid ? products[pid] : null;
 
-			for (i = 0; i < sheet.products.length; i++) {
-				item = sheet.products[i];
-				info = products[item.pid];
-				if (!info || !info.price) known = false;
-				else value += item.amount * info.price;
+				if (!info || !info.price) { known = false; }
+				else { value += amount * info.price; }
 
-				have = 0;
+				var have = 0;
 				try {
-					if (shelf && shelf.getCount) have = shelf.getCount(item.pid) || 0;
+					if (pid && shelf && shelf.getCount) have = shelf.getCount(pid) || 0;
 				} catch (e) { /* полка молчит — считаем, что нет ничего */ }
-				if (have < item.amount) {
-					missing.push({
-						name: (info && info.name) || item.name || ('#' + item.pid),
-						n: item.amount - have
-					});
-				}
+				if (have < amount) missing.push({ name: name, n: amount - have });
 			}
 
-			var g = wimpBonusShare();
-			var offered = (g > 0) ? Math.ceil(sheet.sum * (1 + g)) : sheet.sum;
-			var percent = (known && value > 0) ? Math.round((offered / value - 1) * 100) : null;
+			// Сумма — ровно та, что видит человек: игра уже прибавила бонусы.
+			var sumEl = document.getElementById('wimpVerkaufSumAmount');
+			var offered = parseMoney(sumEl ? sumEl.textContent : '');
+			var percent = (known && value > 0 && offered !== null)
+				? Math.round((offered / value - 1) * 100)
+				: null;
 
 			var box = document.createElement('div');
 			box.id = WIMP_BOX;
@@ -1900,13 +1926,13 @@
 					+ 'дают ' + money(offered) + ' · по цене игры ' + money(value) + '</div>';
 			}
 			if (missing.length) {
-				var m = [];
+				var mm = [];
 				for (i = 0; i < missing.length; i++) {
-					m.push(escText(missing[i].name) + ' ' + missing[i].n);
+					mm.push(escText(missing[i].name) + ' ' + missing[i].n);
 				}
 				html += '<div class="rot" data-si-wimp="missing"'
 					+ ' style="font-size:11px;font-family:Verdana;margin-top:1px">'
-					+ 'не хватает: ' + m.join(', ') + '</div>';
+					+ 'не хватает: ' + mm.join(', ') + '</div>';
 			}
 			box.innerHTML = html;
 			host.appendChild(box);
@@ -2061,6 +2087,29 @@
 					for (i = 0; i < items.length; i++) {
 						if (items[i].getAttribute('data-si-button') === 'plant') plant = items[i];
 						else others.push(items[i]);
+					}
+
+					/*
+					 * ЕСТЬ ЖУК У ИГРЫ — НАШ СТАНОВИТСЯ НЕВИДИМОЙ НАКЛАДКОЙ
+					 * ровно поверх него и в общую расстановку не идёт. Так
+					 * жук на экране один, а нажатие всё равно наше.
+					 */
+					var zhuk = zhukIgry();
+					if (plant && zhuk) {
+						var zr = zhuk.getBoundingClientRect();
+						plant.src = PROZRACHNAYA;
+						plant.style.width = Math.round(zr.width) + 'px';
+						plant.style.height = Math.round(zr.height) + 'px';
+						plant.style.left = Math.round(zr.left - s.left) + 'px';
+						plant.style.top = Math.round(zr.top - s.top) + 'px';
+						plant.setAttribute('data-si-nakladka', '1');
+						plant = null;          // дальше его не расставляем
+					} else if (plant && plant.getAttribute('data-si-nakladka')) {
+						// Жук игры пропал — возвращаем свою картинку и размер.
+						plant.src = gfx('pics/verkauf/anpflanzautomat.gif');
+						plant.style.width = '45px';
+						plant.style.height = '45px';
+						plant.removeAttribute('data-si-nakladka');
 					}
 
 					/*

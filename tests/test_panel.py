@@ -322,6 +322,10 @@ def test_helpers_never_cover_the_games_own_things(game):
 
     Проверяем КАЖДОГО по отдельности: сама накладка теперь лежит поверх всей
     полосы, и по ней судить нельзя.
+
+    Одно исключение НАРОЧНОЕ: прозрачная накладка посадки лежит ровно поверх
+    автомата игры (`#wimpareaAutoplant`) — чтобы жук на экране был один, а
+    нажатие доставалось нам. Она ничего не закрывает: картинки у неё нет.
     """
     clash = game.evaluate(
         "(function(){"
@@ -333,6 +337,7 @@ def test_helpers_never_cover_the_games_own_things(game):
         "  var b=g.getBoundingClientRect();"
         "  [].forEach.call(s.querySelectorAll('*'),function(e){"
         "    if(e===bar||bar.contains(e))return;"
+        "    if(g.getAttribute('data-si-nakladka')&&e.id==='wimpareaAutoplant')return;"
         "    var r=e.getBoundingClientRect();"
         "    if(!r.width||!r.height)return;"
         "    if(r.width>=sw*0.9)return;"
@@ -442,16 +447,20 @@ def test_silent_when_game_objects_absent(server):
             assert conn.evaluate("!!document.getElementById('si-helper')") is False,                 "помощник показался там, где игры нет"
 
 
-def test_buttons_are_the_games_own_gnomes(game):
+def test_buttons_are_the_games_own_gnomes(server):
     """Кнопки — картинки самой игры, как у CupIvan, а не наши плашки.
 
     Владелец выбрал «полностью по Ивану», а агент сперва поставил текстовые
     плашки, решив за него. Эта проверка не даёт откатиться обратно.
     """
-    srcs = game.evaluate(
-        "[].map.call(document.querySelectorAll('#si-helper [data-si-button]'),"
-        "function(e){return e.getAttribute('src')||''})"
-    )
+    # Без автомата игры помощник рисует своего жука — тут и проверяем набор.
+    with stand(server, "?bez_avtomata=1") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button]').length===4",
+              "кнопки не появились")
+        srcs = conn.evaluate(
+            "(function(){var a=document.querySelectorAll('#si-helper [data-si-button]'),o=[];"
+            "for(var i=0;i<a.length;i++)o.push(a[i].getAttribute('src')||'');return o})()"
+        )
     assert len(srcs) == 4, f"кнопок-картинок должно быть 4: {srcs}"
 
     joined = " ".join(srcs)
@@ -1336,3 +1345,111 @@ def test_one_failing_step_does_not_stop_the_helper(server):
         assert "сломано нарочно" in state, f"причина сбоя не дошла до отчёта: {state}"
         n = conn.evaluate("document.querySelectorAll('#si-helper-gardens img').length")
         assert n > 2, f"столбик не собрался, хотя сбой был в другом шаге: {n}"
+
+
+# ── живая игра 2026-09-11: две находки, которых стенд не показывал ────
+
+
+def test_wimp_block_works_when_sheets_arrive_with_the_garden(server):
+    """Листки пришли ВМЕСТЕ с садом — блок выгодности всё равно есть.
+
+    На живой игре `verkaufajax` + `do:getData` не вызывается ни разу: листки
+    лежат в данных, пришедших с садом. Расчёт, ждавший ответа сервера, не
+    появлялся у игрока вовсе — он так и написал: «процентов выгоды у
+    попрошаек нет». Читать надо то, что игра УЖЕ нарисовала.
+    """
+    with stand(server, "?listki=srazu") as conn:
+        _open_wimp(conn, 11)
+        assert conn.evaluate("window.__wimpAsks") == 0, "на сервер ходить не должны были"
+        text = _wimp_text(conn)
+        assert "+20%" in text, f"процент не посчитан из нарисованного: {text}"
+
+
+def test_the_games_own_beetle_is_not_duplicated(game):
+    """Жук один. Если у игры свой автомат посадки — своего не рисуем.
+
+    Игрок прислал снимок: «у тебя два жука, а должен быть один у гнома
+    сверху». Игра рисует `#wimpareaAutoplant` сама, а мы дорисовывали такой
+    же ниже.
+    """
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button]').length>0",
+          "гномы не появились")
+    r = game.evaluate("""(function(){
+        var svoy = document.querySelector('#si-helper [data-si-button=plant]');
+        var igry = document.getElementById('wimpareaAutoplant');
+        var n = 0, imgs = document.getElementsByTagName('img');
+        for (var i=0;i<imgs.length;i++){
+            if ((imgs[i].getAttribute('src')||'').indexOf('anpflanzautomat')>=0) n++;
+        }
+        if (igry && /anpflanz/.test(getComputedStyle(igry).backgroundImage||'')) n++;
+        var kart = svoy && (svoy.getAttribute('src')||'').indexOf('anpflanz')>=0
+                   ? svoy.getAttribute('src') : null;
+        return {жуковВсего:n, нашЖук:!!svoy, жукИгры:!!igry, нашаКартинка:kart};
+    })()""")
+    assert r["жукИгры"], "стенд должен держать автомат посадки игры"
+    assert r["жуковВсего"] == 1, f"жуков на экране должно быть ровно один: {r}"
+    # Наш элемент остаётся — но прозрачной накладкой, а не вторым жуком.
+    assert r["нашЖук"], "накладка для нажатия должна быть на месте"
+    assert r["нашаКартинка"] is None, f"наш жук всё ещё рисует свою картинку: {r}"
+
+
+def test_our_pad_covers_the_games_beetle(game):
+    """Наш жук — прозрачная накладка ровно поверх жука игры.
+
+    Видимый жук один — её. Нажатие ловим мы: платный автомат игры работает
+    на покупаемых «зарядах», и тратить их молча нельзя.
+    """
+    _wait(game, "!!document.querySelector('#si-helper [data-si-nakladka]')",
+          "накладка поверх жука игры не появилась")
+    r = game.evaluate("""(function(){
+        function b(e){var x=e.getBoundingClientRect();
+            return {l:Math.round(x.left),t:Math.round(x.top),w:Math.round(x.width),h:Math.round(x.height)};}
+        var nash=b(document.querySelector('#si-helper [data-si-button=plant]'));
+        var igry=b(document.getElementById('wimpareaAutoplant'));
+        return {наш:nash, игры:igry,
+                прозрачный:(document.querySelector('#si-helper [data-si-button=plant]').getAttribute('src')||'').indexOf('anpflanz')<0,
+                вышеПоСлоям: getComputedStyle(document.getElementById('si-helper')).zIndex};
+    })()""")
+    assert r["прозрачный"], f"наш жук всё ещё рисует свою картинку: {r}"
+    assert abs(r["наш"]["l"] - r["игры"]["l"]) <= 2 and abs(r["наш"]["t"] - r["игры"]["t"]) <= 2, (
+        f"накладка не совпала с жуком игры: {r}")
+    assert r["наш"]["w"] == r["игры"]["w"] and r["наш"]["h"] == r["игры"]["h"], (
+        f"размер накладки не тот: {r}")
+
+    game.evaluate("window.__igraAvtomat = 0; selected = 1; true")
+    _press(game, "plant")
+    _wait(game, "/Посажено|Свободных|полке/.test(" + _status_expr() + ")",
+          "нажатие по накладке ничего не сделало")
+    assert game.evaluate("window.__igraAvtomat") == 0, (
+        "сработал платный автомат игры — заряды тратить нельзя")
+
+
+def test_own_beetle_returns_without_the_games_one(server):
+    """У игры автомата нет — рисуем своего жука, возможность не пропадает."""
+    with stand(server, "?bez_avtomata=1") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=plant]').length>0",
+              "своего жука нет")
+        src = conn.evaluate(
+            "document.querySelector('#si-helper [data-si-button=plant]').getAttribute('src')")
+        assert "anpflanzautomat" in src, f"свой жук без картинки игры: {src}"
+
+
+def test_own_beetle_comes_back_when_the_games_one_disappears(game):
+    """Жук игры пропал посреди работы — свой возвращается с картинкой и размером.
+
+    Игра перерисовывает полосу сама, и её автомат может исчезнуть (другой
+    сад, другой уровень). Накладка без жука под ней — невидимая кнопка,
+    которую человеку не нажать: возможность посадки пропала бы молча.
+    """
+    _wait(game, "!!document.querySelector('#si-helper [data-si-nakladka]')",
+          "накладка не появилась")
+    game.evaluate("document.getElementById('wimpareaAutoplant').remove(); true")
+    _wait(game, "!document.querySelector('#si-helper [data-si-nakladka]')",
+          "накладка осталась, хотя жука игры уже нет")
+    r = game.evaluate("""(function(){
+        var e=document.querySelector('#si-helper [data-si-button=plant]');
+        var b=e.getBoundingClientRect();
+        return {src:e.getAttribute('src')||'', w:Math.round(b.width), h:Math.round(b.height)};
+    })()""")
+    assert "anpflanzautomat" in r["src"], f"свой жук не вернул картинку: {r}"
+    assert r["w"] == 45 and r["h"] == 45, f"свой жук не вернул размер: {r}"

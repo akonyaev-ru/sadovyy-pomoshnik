@@ -50,6 +50,25 @@
 	<img id="i1" class="wimp wimp3 link" style="position:absolute;left:210px;top:43px;width:30px;height:40px;background:#8a6" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
 	<div class="link weed" style="position:absolute;left:210px;top:0;width:45px;height:37px;background:#4a7a35"></div>
 	<div id="barkerOpener" class="link" style="position:absolute;left:268px;top:0;width:50px;height:45px;background:#7a6a45"></div>
+	<!--
+		АВТОМАТ ПОСАДКИ САМОЙ ИГРЫ. На живой игре он есть и рисуется фоном:
+		`#wimpareaAutoplant` в верхней строке. Пока стенд его не держал, наш
+		жук выглядел единственным — а у игрока их было ДВА. Размеры и место
+		из её style.css: 45×45, left:318, top:0.
+	-->
+	<!-- ?bez_avtomata=1 — у игры своего автомата нет: проверяем запасной путь,
+	     когда помощник рисует собственного жука. -->
+	<div id="wimpareaAutoplant" class="link"
+		style="position:absolute;z-index:1;width:45px;height:45px;top:0;left:318px;
+		       background:#3a5a3a url('https://wurzelimperium.wavecdn.net/pics/verkauf/anpflanzautomat.gif') no-repeat"
+		onclick="window.__igraAvtomat = (window.__igraAvtomat||0) + 1;"></div>
+	<script>
+		if (/[?&]bez_avtomata=1/.test(location.search)) {
+			var __a = document.getElementById('wimpareaAutoplant');
+			if (__a) __a.remove();
+		}
+	</script>
+
 	<div id="wimpareaHelper">
 		<div class="gnomes" style="position:absolute;left:370px;top:0;width:175px;height:45px">
 			<div class="link science slot1" style="position:absolute;left:49px;top:0;width:36px;height:45px;background:#5d8f3d"></div>
@@ -741,6 +760,13 @@ window.__wimpAsks = 0;     // сколько раз ходили на серве
 var wimparea = (function () {
 	var p = {};
 	var q = { 11: { id: 11, sheet: null }, 12: { id: 12, sheet: null } };
+
+	// На живой игре (проверено 2026-09-11) листки приходят ВМЕСТЕ с садом, и
+	// `verkaufajax` не вызывается ни разу. Режим `?listki=srazu` это и
+	// воспроизводит: у попрошаек сразу есть `sheet`, ходить некуда.
+	if (/[?&]listki=srazu/.test(location.search)) {
+		for (var __k in q) { if (WIMP_SHEETS[__k]) q[__k].sheet = WIMP_SHEETS[__k]; }
+	}
 
 	// show — из игры: если листок уже приходил, второй раз не спрашиваем.
 	p.show = function (z) {

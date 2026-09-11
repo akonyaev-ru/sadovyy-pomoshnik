@@ -1253,3 +1253,86 @@ def test_market_reopens_the_city_after_leaving_it(game):
     assert game.evaluate("window.__city.length") == 2, "гном не открыл город заново" 
     _wait(game, _stall_expr("!!d.getElementById('produkt_anzahl')"),
           "палатка не открылась во второй раз")
+
+
+# ── аудит 2026-09-11: первая живая проверка игроком ──────────────────
+#
+# «Панель с садами пропала, поливайка и сажалка не работали». Разбор по CSS
+# игры: `#multiframe` не спрятан стилями, его прячет код по событиям, а до
+# того он стоит на странице видимым и ПУСТЫМ. Прежняя проверка «мы в саду»
+# судила по одному `display` — и гасила помощника целиком. Стенд с тех пор
+# держит такой контейнер всегда: на старом коде гномы не появляются вовсе.
+
+
+def test_helpers_ignore_an_empty_overlay(game):
+    """Пустой контейнер накладки — не повод прятаться."""
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button]').length>0",
+          "гномы не появились")
+    v = game.evaluate("""(function(){
+        var m=document.getElementById('multiframe');
+        var b=document.getElementById('si-helper');
+        var g=document.getElementById('si-helper-gardens');
+        return {konteyner:m?getComputedStyle(m).display:'нет',
+                polosa:b?getComputedStyle(b).display:'нет',
+                stolbik:g?getComputedStyle(g).display:'нет'};
+    })()""")
+    assert v["konteyner"] == "block", f"стенд должен держать пустую накладку видимой: {v}"
+    assert v["polosa"] != "none", f"гномы спрятались из-за пустого контейнера: {v}"
+    assert v["stolbik"] != "none", f"столбик спрятался из-за пустого контейнера: {v}"
+
+
+def test_helpers_hide_behind_a_loaded_overlay(server):
+    """Накладка с настоящим содержимым — прячемся, и говорим почему."""
+    with stand(server, "?multiframe=polny") as conn:
+        _wait(conn, "(function(){var b=document.getElementById('si-helper');"
+                    "return b && getComputedStyle(b).display === 'none'})()",
+              "за открытой накладкой гномы остались на экране")
+        state = conn.evaluate("window.SI_HELPER && window.SI_HELPER.sostoyanie")
+        assert "multiframe" in state, f"самоотчёт не назвал причину: {state}"
+
+
+def test_helper_waits_for_a_late_game(server):
+    """Игра дописала свои объекты через три секунды — помощник дождался.
+
+    Прежний запуск проверял игру один раз на `load` и уходил навсегда.
+    """
+    with stand(server, "?pozdno=1") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button]').length>0",
+              "помощник не дождался игры")
+        state = conn.evaluate("window.SI_HELPER && window.SI_HELPER.sostoyanie")
+        assert state.startswith("в саду"), f"после ожидания состояние не «в саду»: {state}"
+
+
+def test_panel_reports_its_own_state(game):
+    """Панель выкладывает состояние — программа пишет его в журнал.
+
+    Единственное, что возвращается с чужой машины, — журнал; по нему должно
+    быть видно, появился ли помощник, спрятался ли и почему, сколько садов.
+    """
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button]').length>0",
+          "гномы не появились")
+    _wait(game, "/^в саду/.test((window.SI_HELPER||{}).sostoyanie||'')", "состояние не выложено")
+    state = game.evaluate("window.SI_HELPER.sostoyanie")
+    assert "гномов 4" in state, f"число гномов не сходится: {state}"
+    assert "столбике" in state and "сад 1" in state, f"в состоянии нет садов: {state}"
+
+    game.evaluate("zeigeStadtMain(1); true")
+    _wait(game, "/^спрятан/.test((window.SI_HELPER||{}).sostoyanie||'')",
+          "в городе состояние не переключилось")
+
+
+def test_one_failing_step_does_not_stop_the_helper(server):
+    """Сбой одного шага цикла не останавливает панель и попадает в самоотчёт.
+
+    `tick()` идёт раз в секунду и держит всё разом. Прежде исключение в
+    любом шаге обрывало цикл молча и навсегда. Здесь полоса помощников
+    ломает замер — а столбик всё равно собирается, и причина сбоя названа.
+    """
+    with stand(server, "?slomat=polosa") as conn:
+        _wait(conn, "/^в саду/.test((window.SI_HELPER||{}).sostoyanie||'')",
+              "цикл остановился на первом же сбое")
+        state = conn.evaluate("window.SI_HELPER.sostoyanie")
+        assert "сбой" in state and "расстановка" in state, f"сбой не назван: {state}"
+        assert "сломано нарочно" in state, f"причина сбоя не дошла до отчёта: {state}"
+        n = conn.evaluate("document.querySelectorAll('#si-helper-gardens img').length")
+        assert n > 2, f"столбик не собрался, хотя сбой был в другом шаге: {n}"

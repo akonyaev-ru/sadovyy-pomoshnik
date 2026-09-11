@@ -48,6 +48,23 @@ def log_path() -> Path:
     return Path(os.path.expandvars(r"%LOCALAPPDATA%")) / "SadovyPomoshnik" / LOG_NAME
 
 
+def rotate_log(path: Path) -> None:
+    """Прошлый журнал остаётся рядом как `помощник.1.log`.
+
+    Журнал открывается на запись с нуля, и до 2026-09-11 каждый запуск
+    затирал предыдущий. Игрок, у которого что-то не вышло, запускает
+    помощника ещё раз — и журнал неудачного запуска пропадает раньше, чем
+    его успеют прочитать. Ровно это случилось с первой живой проверкой:
+    два окна, пустое и второе, а разбираться не по чему. Один прошлый
+    запуск теперь всегда под рукой.
+    """
+    try:
+        if path.exists():
+            os.replace(path, path.with_name(path.stem + ".1" + path.suffix))
+    except OSError:
+        pass
+
+
 def has_console() -> bool:
     """Есть ли у программы настоящее окно консоли.
 
@@ -74,6 +91,7 @@ def setup_output() -> None:
     if sys.stdout is None or sys.stderr is None or not has_console():
         path = log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
+        rotate_log(path)
         stream = open(path, "w", encoding="utf-8", buffering=1)
         sys.stdout = stream
         sys.stderr = stream
@@ -88,6 +106,23 @@ def show_error(text: str) -> None:
 
         ctypes.windll.user32.MessageBoxW(
             None, text, "Садовый помощник", 0x10)
+    except Exception:
+        pass
+
+
+def show_wait(text: str) -> None:
+    """Окно с одной кнопкой «ОК», которое ЖДЁТ нажатия.
+
+    Нужно там, где от человека требуется действие, а потом — продолжение
+    работы: «закройте приложение через трей и нажмите ОК». `show_error`
+    для этого не годится по смыслу (значок ошибки и выход), `show_note` —
+    по устройству (не ждёт).
+    """
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(
+            None, text, "Садовый помощник", 0x40)   # 0x40 — значок «i», кнопка ОК
     except Exception:
         pass
 
@@ -200,6 +235,7 @@ def run(
     target: str = "auto",
     go_straight: bool = True,
     force_close: bool = False,
+    app_override: Path | None = None,
 ) -> int:
     try:
         source = payload.load(SCRIPTS[script_name])
@@ -208,7 +244,16 @@ def run(
         return 2
 
     # Куда селиться: в приложение upjers Home или в отдельный Chrome.
-    app_path = None if target == "browser" else browser.find_upjers()
+    # Путь, названный явно (`--app`), сильнее любого поиска.
+    poisk: list[str] = []
+    if target == "browser":
+        app_path = None
+    elif app_override is not None:
+        app_path = app_override if browser._is_upjers_exe(app_override) else None
+        poisk.append(f"указан явно: {app_override}"
+                     + ("" if app_path else " — такого файла нет"))
+    else:
+        app_path = browser.find_upjers(poisk)
 
     if app_path:
         _head(script_name, "приложение upjers Home")
@@ -278,30 +323,43 @@ def run(
                 # успевает сохранить вход — проверено 2026-09-09: после этого
                 # игра встречает окном входа, а сервер игры отдаёт пустую
                 # страницу. Терять вход игрока при каждом запуске нельзя.
+                #
+                # ПОЧЕМУ ЖДЁМ, А НЕ ВЫХОДИМ. Раньше здесь программа
+                # показывала ошибку и завершалась: «закройте и запустите
+                # помощника снова». Для игрока это лишний круг, на котором
+                # легко запутаться. Теперь окно ждёт: закрыл приложение —
+                # нажал «ОК» — помощник открывает его сам, уже со своим
+                # портом. Второго запуска не нужно.
                 _say(f"  Приложение upjers Home уже работает ({len(busy)} процессов —")
                 _say("  это один запуск, у таких приложений их всегда несколько).")
                 _say()
                 _say("  Подключиться к нему не выходит: его запускали не мы, и")
                 _say("  отладочного порта у него нет — встроиться некуда.")
-                _say()
-                _say("  Закройте его САМИ — через значок в трее, у часов:")
-                _say("  правой кнопкой по значку upjers → «Выход» (Quit).")
-                _say("  Потом запустите помощника снова: дальше он будет")
-                _say("  подключаться к уже открытому приложению сам.")
-                _say()
-                _say("  Почему не закрываю сам: приложение прячется в трей, и")
-                _say("  снять его можно только принудительно, а тогда оно теряет")
-                _say("  ваш вход в игру, и придётся входить заново.")
-                show_error(
-                    "Приложение upjers Home уже работает," + chr(10)
-                    + "и запускали его не через помощника." + chr(10) + chr(10)
-                    + "Закройте его через значок в трее, у часов:" + chr(10)
-                    + "правой кнопкой по значку upjers → «Выход»." + chr(10)
-                    + "Потом запустите помощника снова." + chr(10) + chr(10)
-                    + "Закрывать принудительно нельзя: приложение потеряет"
-                    + " ваш вход в игру."
+                _say("  Прошу закрыть его через значок у часов и жду «ОК».")
+                show_wait(
+                    "Игра уже открыта, но запускали её не через помощника," + chr(10)
+                    + "и подключиться к ней он не может." + chr(10) + chr(10)
+                    + "Закройте её: правой кнопкой по значку upjers" + chr(10)
+                    + "у часов (внизу справа) → «Выход»." + chr(10) + chr(10)
+                    + "Потом нажмите ОК — помощник откроет игру сам."
                 )
-                return 6
+                # Приложению нужно несколько секунд, чтобы действительно выйти.
+                for _ in range(20):
+                    busy = browser.upjers_running()
+                    if not busy:
+                        break
+                    time.sleep(0.75)
+                if busy:
+                    _say(f"  После «ОК» приложение всё ещё работает ({len(busy)} процессов).")
+                    show_error(
+                        "Игра всё ещё открыта." + chr(10) + chr(10)
+                        + "Закройте её через значок upjers у часов" + chr(10)
+                        + "(правой кнопкой → «Выход») и запустите" + chr(10)
+                        + "помощника ещё раз."
+                    )
+                    return 6
+                _say("  Приложение закрыто. Открываю его сам.")
+                _say()
             else:
                 _say(f"  Закрываю приложение принудительно ({len(busy)} процессов).")
                 _say("  ВНИМАНИЕ: вход в игру при этом теряется — так устроено")
@@ -320,8 +378,28 @@ def run(
             _say("  Запускаю приложение…")
             proc, port = browser.launch_app(app_path, port=port)
     else:
-        if target == "app":
+        if target != "browser":
+            # БЕЗ ТИХОГО CHROME. Раньше `auto` без приложения молча открывал
+            # отдельный браузер — пустое окно, в котором игрок войти в игру
+            # не умеет: его вход живёт в приложении. Первая живая проверка
+            # 2026-09-11 закончилась ровно так: «открылось окно, где ничего
+            # не было». Теперь говорим прямо, где искали, и останавливаемся.
+            # Отдельный браузер остаётся только по явному `--target browser`.
             _say("  ОШИБКА: приложение upjers Home на этом компьютере не найдено.")
+            _say("  Где искал:")
+            for line in poisk:
+                _say("    " + line)
+            _say("  Помощник работает только через приложение: в нём ваш вход в игру.")
+            show_error(
+                "Не нашёл приложение upjers Home на этом компьютере." + chr(10) + chr(10)
+                + "Помощник работает только через него:" + chr(10)
+                + "в нём сохранён ваш вход в игру." + chr(10) + chr(10)
+                + "Где искал:" + chr(10)
+                + chr(10).join("  " + line for line in poisk) + chr(10) + chr(10)
+                + "Если игра у вас установлена — откройте её сами," + chr(10)
+                + "дождитесь сада и запустите помощника ещё раз:" + chr(10)
+                + "он найдёт открытую игру и запомнит, где она."
+            )
             return 3
         try:
             exe = chrome_path or browser.find_chrome()
@@ -350,6 +428,7 @@ def run(
     tabs: dict[str, cdp.Cdp] = {}
     measured: set[str] = set()
     opened: dict[str, dict] = {}
+    states: dict[str, str] = {}
     straight = bool(app_path and go_straight)
     where = "приложение" if app_path else "окно браузера"
     _say("  Готово. Помощник появится в игре сам —")
@@ -364,7 +443,7 @@ def run(
 
     try:
         while proc.poll() is None:
-            _sync_tabs(port, tabs, source, measured, opened, straight)
+            _sync_tabs(port, tabs, source, measured, opened, straight, states)
             for conn in list(tabs.values()):
                 try:
                     conn.drain()
@@ -592,8 +671,38 @@ def _measure_once(conn, printed: set, tid: str) -> None:
     _say()
 
 
+STATE_JS = r"""
+(function () {
+  var s = window.SI_HELPER;
+  if (s && s.sostoyanie) return String(s.sostoyanie);
+  if (typeof window.gardenjs === 'undefined') return 'страница без игры: ' + location.hostname;
+  return 'игра есть, помощника на странице нет';
+})()
+"""
+
+
+def _report_state(conn, states: dict, tid: str) -> None:
+    """Пишет в журнал, что панель сама о себе говорит, — когда это меняется.
+
+    Зачем. Единственное, что возвращается с чужой машины, — журнал. Пока в
+    нём был только замер полосы, по нему нельзя было понять главного:
+    появился ли помощник, спрятался ли и почему, сколько садов увидел.
+    Панель теперь выкладывает своё состояние в `window.SI_HELPER`, а
+    программа записывает его при каждой перемене.
+    """
+    try:
+        text = str(conn.evaluate(STATE_JS) or "").strip()
+    except Exception:
+        return
+    if not text or states.get(tid) == text:
+        return
+    states[tid] = text
+    _say(f"  панель: {text}")
+
+
 def _sync_tabs(port: int, tabs: dict, source: str, printed: set | None = None,
-               opened: dict | None = None, go_straight: bool = False) -> None:
+               opened: dict | None = None, go_straight: bool = False,
+               states: dict | None = None) -> None:
     """Держит вставку во ВСЕХ вкладках, а не в одной.
 
     Вставка `addScriptToEvaluateOnNewDocument` живёт только в той вкладке, к
@@ -635,6 +744,10 @@ def _sync_tabs(port: int, tabs: dict, source: str, printed: set | None = None,
         for tid, conn in list(tabs.items()):
             _measure_once(conn, printed, tid)
 
+    if states is not None:
+        for tid, conn in list(tabs.items()):
+            _report_state(conn, states, tid)
+
     for tid in list(tabs):
         if tid not in alive:
             tabs.pop(tid).close()
@@ -658,6 +771,12 @@ def main(argv: list[str] | None = None) -> int:
         help="какой код вставлять в страницу",
     )
     parser.add_argument("--chrome", type=Path, default=None, help="путь к chrome.exe")
+    parser.add_argument(
+        "--app",
+        type=Path,
+        default=None,
+        help="путь к «upjers Home.exe», если помощник сам его не находит",
+    )
     parser.add_argument(
         "--no-straight",
         action="store_true",
@@ -732,7 +851,8 @@ def main(argv: list[str] | None = None) -> int:
         return 7
 
     return run(args.url, args.script, args.chrome, args.port, args.profile,
-               args.host_rules, args.target, not args.no_straight, args.force_close)
+               args.host_rules, args.target, not args.no_straight, args.force_close,
+               args.app)
 
 
 if __name__ == "__main__":

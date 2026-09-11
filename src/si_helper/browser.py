@@ -37,7 +37,42 @@ UPJERS_CANDIDATES = (
     r"%PROGRAMFILES%\upjers Home\upjers Home.exe",
 )
 
+# Папки, внутри которых установщики Electron кладут приложение своей
+# подпапкой. Имя подпапки у разных версий разное (`upjers-playground2`,
+# `upjers-home`, …) — поэтому смотрим ВСЕ подпапки, а не угадываем имя.
+UPJERS_FOLDERS = (
+    r"%LOCALAPPDATA%\Programs",
+    r"%PROGRAMFILES%",
+    r"%PROGRAMFILES(X86)%",
+    r"%LOCALAPPDATA%",
+)
+
+# Где лежат ярлыки, которыми игрок обычно и запускает приложение.
+SHORTCUT_FOLDERS = (
+    r"%USERPROFILE%\Desktop",
+    r"%PUBLIC%\Desktop",
+    r"%APPDATA%\Microsoft\Windows\Start Menu\Programs",
+    r"%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs",
+)
+
 UPJERS_PROCESS = "upjers Home.exe"
+UPJERS_EXE = "upjers Home.exe"
+
+# Консольные утилиты Windows (`tasklist`, `netstat`, `taskkill`, PowerShell)
+# запускаем БЕЗ ОКНА. У сборки нет консоли, и без этого флага каждый вызов
+# на секунду вспыхивал пустым чёрным окном — `tasklist` идёт при каждом
+# запуске. Первая живая проверка 2026-09-11: «сначала открылось окно, где
+# ничего не было» — такое окно и есть.
+BEZ_OKNA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Заметка «где лежит приложение». Пишется, как только оно найдено любым
+# способом, и читается первой при следующем запуске: дорогие способы поиска
+# (реестр, ярлыки) второй раз не нужны.
+NOTE_NAME = "prilozhenie.txt"
+
+
+def note_path() -> Path:
+    return Path(os.path.expandvars(r"%LOCALAPPDATA%")) / "SadovyPomoshnik" / NOTE_NAME
 
 
 class BrowserNotFound(RuntimeError):
@@ -86,12 +121,197 @@ def remove_profile(path, tries: int = 6) -> bool:
     return not path.exists()
 
 
-def find_upjers() -> Path | None:
-    """Ищет приложение upjers Home. Возвращает None, если его нет."""
+def _is_upjers_exe(path) -> bool:
+    try:
+        p = Path(path)
+        return p.name.lower() == UPJERS_EXE.lower() and p.is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def _upjers_from_note(report: list[str]) -> Path | None:
+    """Путь, запомненный прошлым запуском."""
+    np = note_path()
+    try:
+        raw = np.read_text(encoding="utf-8").strip()
+    except OSError:
+        report.append("заметка прошлого запуска: нет")
+        return None
+    if raw and _is_upjers_exe(raw):
+        report.append(f"заметка прошлого запуска: {raw}")
+        return Path(raw)
+    report.append(f"заметка прошлого запуска: устарела ({raw or 'пусто'})")
+    return None
+
+
+def _upjers_from_candidates(report: list[str]) -> Path | None:
     for raw in UPJERS_CANDIDATES:
         p = Path(os.path.expandvars(raw))
         if p.is_file():
+            report.append(f"обычное место: {p}")
             return p
+    report.append("обычные места установки: нет")
+    return None
+
+
+def _upjers_from_folders(report: list[str]) -> Path | None:
+    """Любая подпапка известных папок с программами."""
+    for raw in UPJERS_FOLDERS:
+        expanded = os.path.expandvars(raw)
+        if "%" in expanded:          # переменной среды нет — папки тоже
+            continue
+        base = Path(expanded)
+        if not base.is_dir():
+            continue
+        try:
+            for sub in sorted(base.iterdir()):
+                cand = sub / UPJERS_EXE
+                if cand.is_file():
+                    report.append(f"подпапка программ: {cand}")
+                    return cand
+        except OSError:
+            continue
+    report.append("подпапки программ: нет")
+    return None
+
+
+def _powershell(script: str, timeout: float = 25.0) -> str:
+    """Короткий вызов PowerShell без профиля и без окна."""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, creationflags=BEZ_OKNA,
+        )
+    except Exception:
+        return ""
+    return r.stdout or ""
+
+
+def _upjers_from_process(report: list[str]) -> Path | None:
+    """Путь уже работающего приложения — у Windows он есть всегда."""
+    out = _powershell(
+        "Get-Process -Name 'upjers Home' -ErrorAction SilentlyContinue "
+        "| Select-Object -First 1 -ExpandProperty Path"
+    )
+    for line in out.splitlines():
+        line = line.strip()
+        if line and _is_upjers_exe(line):
+            report.append(f"работающее приложение: {line}")
+            return Path(line)
+    report.append("работающее приложение: нет")
+    return None
+
+
+def _upjers_from_registry(report: list[str]) -> Path | None:
+    """Список установленных программ: DisplayIcon или InstallLocation."""
+    try:
+        import winreg
+    except ImportError:
+        report.append("реестр: недоступен")
+        return None
+    roots = (
+        (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+    )
+    for root, path in roots:
+        try:
+            key = winreg.OpenKey(root, path)
+        except OSError:
+            continue
+        i = 0
+        while True:
+            try:
+                sub = winreg.EnumKey(key, i)
+                i += 1
+            except OSError:
+                break
+            try:
+                sk = winreg.OpenKey(key, sub)
+            except OSError:
+                continue
+            vals = {}
+            for name in ("DisplayName", "DisplayIcon", "InstallLocation"):
+                try:
+                    vals[name] = str(winreg.QueryValueEx(sk, name)[0])
+                except OSError:
+                    pass
+            haystack = (sub + " " + " ".join(vals.values())).lower()
+            if "upjers" not in haystack:
+                continue
+            icon = vals.get("DisplayIcon", "").split(",")[0].strip().strip('"')
+            if icon and _is_upjers_exe(icon):
+                report.append(f"реестр: {icon}")
+                return Path(icon)
+            loc = vals.get("InstallLocation", "").strip().strip('"')
+            if loc:
+                cand = Path(loc) / UPJERS_EXE
+                if cand.is_file():
+                    report.append(f"реестр: {cand}")
+                    return cand
+    report.append("реестр (установленные программы): нет")
+    return None
+
+
+def _upjers_from_shortcuts(report: list[str]) -> Path | None:
+    """Ярлыки на рабочем столе и в меню «Пуск» — куда они ведут."""
+    dirs = [os.path.expandvars(d) for d in SHORTCUT_FOLDERS]
+    dirs = [d for d in dirs if "%" not in d and Path(d).is_dir()]
+    if not dirs:
+        report.append("ярлыки: папок нет")
+        return None
+    quoted = ",".join("'" + d.replace("'", "''") + "'" for d in dirs)
+    out = _powershell(
+        "$s = New-Object -ComObject WScript.Shell; "
+        "Get-ChildItem -Path " + quoted + " -Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue "
+        "| ForEach-Object { try { $s.CreateShortcut($_.FullName).TargetPath } catch { } } "
+        "| Where-Object { $_ -like '*upjers*' }"
+    )
+    for line in out.splitlines():
+        line = line.strip()
+        if line and _is_upjers_exe(line):
+            report.append(f"ярлык: {line}")
+            return Path(line)
+    report.append("ярлыки (рабочий стол, меню «Пуск»): нет")
+    return None
+
+
+def remember_upjers(path: Path) -> None:
+    """Записывает найденный путь, чтобы в следующий раз не искать."""
+    try:
+        np = note_path()
+        np.parent.mkdir(parents=True, exist_ok=True)
+        np.write_text(str(path), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def find_upjers(report: list[str] | None = None) -> Path | None:
+    """Ищет приложение upjers Home. Возвращает None, если его нет.
+
+    ПОЧЕМУ ИЩЕМ ШИРОКО. У игрока приложение может стоять не там, где у
+    владельца: у установщиков Electron имя подпапки меняется от версии к
+    версии, бывает установка «для всех» в Program Files. Три угаданных пути
+    2026-09-11 не нашли приложение у игрока — и помощник молча открыл
+    браузер, в котором игрок войти не умеет. Теперь порядок такой:
+    заметка прошлого запуска → обычные места → любая подпапка папок с
+    программами → работающий процесс → реестр → ярлыки. В `report`
+    складывается, где искали: это уходит в журнал и в окно ошибки.
+    """
+    report = report if report is not None else []
+    for finder in (
+        _upjers_from_note,
+        _upjers_from_candidates,
+        _upjers_from_folders,
+        _upjers_from_process,
+        _upjers_from_registry,
+        _upjers_from_shortcuts,
+    ):
+        found = finder(report)
+        if found:
+            remember_upjers(found)
+            return found
     return None
 
 
@@ -107,6 +327,7 @@ def upjers_running() -> list[int]:
         out = subprocess.run(
             ["tasklist", "/FI", f"IMAGENAME eq {UPJERS_PROCESS}", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, encoding="cp866", errors="replace", timeout=15,
+            creationflags=BEZ_OKNA,
         ).stdout
     except Exception:
         return []
@@ -154,7 +375,7 @@ def debug_port_of(pids: list[int]) -> int | None:
         out = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True, text=True, encoding="cp866",
-            errors="replace", timeout=20,
+            errors="replace", timeout=20, creationflags=BEZ_OKNA,
         ).stdout
     except Exception:
         return None
@@ -306,7 +527,7 @@ def close_upjers(timeout: float = 12.0) -> int:
         for pid in pids:
             cmd += ["/PID", str(pid)]
         try:
-            subprocess.run(cmd, capture_output=True, timeout=20)
+            subprocess.run(cmd, capture_output=True, timeout=20, creationflags=BEZ_OKNA)
         except Exception:
             pass
 

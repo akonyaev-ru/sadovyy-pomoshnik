@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Садовый помощник
 // @namespace    si-helper
-// @version      2026.1
+// @version      2026.2
 // @description  Кнопки-помощники внутри игры. Действует только по нажатию.
 // @match        https://*.molehillempire.com/*
 // @match        https://*.sadowajaimperija.ru/*
@@ -56,6 +56,24 @@
 	if (document.readyState === 'complete') { boot(); }
 	else { window.addEventListener('load', function () { boot(); }, { once: true }); }
 
+	/*
+	 * ИГРА МОЖЕТ ОПОЗДАТЬ К `load`. Её объекты появляются из своих скриптов,
+	 * и если они не успели к моменту нашей проверки, прежний код уходил
+	 * НАВСЕГДА — молча, без второй попытки. Поэтому на узле игры ждём до
+	 * тридцати секунд. Не на узле игры — уходим сразу: граница важнее.
+	 */
+	var BOOT_RETRIES = 30;
+	var bootTries = 0;
+
+	function bootLater() {
+		if (bootTries >= BOOT_RETRIES) {
+			try { window.SI_HELPER = { sostoyanie: 'игра так и не появилась на странице' }; } catch (e) {}
+			return;
+		}
+		bootTries++;
+		setTimeout(boot, 1000);
+	}
+
 	function boot() {
 		if (window.top !== window.self) return;          // только верхнее окно
 		if (document.getElementById('si-helper')) return; // уже нарисованы
@@ -78,7 +96,13 @@
 		 * Поэтому проверяем дважды: сначала имя узла, потом наличие самой игры
 		 * на странице. Нет игры — молча уходим, ничего не рисуя.
 		 */
-		if (!looksLikeGame()) return;
+		if (!looksLikeGame()) {
+			if (onGameHost()) {
+				try { window.SI_HELPER = { sostoyanie: 'жду игру (объектов игры на странице ещё нет)' }; } catch (e) {}
+				bootLater();
+			}
+			return;
+		}
 
 		var CELLS = 204;   // сад 17 × 12
 		// Пауза между действиями. Игра сама шлёт пачками по шесть, но подавать
@@ -2123,20 +2147,85 @@
 		 */
 		var NAKLADKI = ['stadt', 'citymap', 'multiframe'];
 
-		function vSadu() {
+		/*
+		 * НАКЛАДКА СЧИТАЕТСЯ ОТКРЫТОЙ, ТОЛЬКО ЕСЛИ В НЕЙ ЧТО-ТО ЕСТЬ.
+		 *
+		 * По одному `display` судить нельзя. `#multiframe` в CSS игры не
+		 * спрятан вовсе (`z-index:22; position:absolute; 600×400` — и ни
+		 * слова про display): прячет его код игры по событиям. Пустой
+		 * контейнер с `display:block` по компьютеру «виден», и прежняя
+		 * проверка гасила помощника целиком — ни гномов, ни садов.
+		 * Первая живая проверка 2026-09-11 («панель с садами пропала,
+		 * поливайка и сажалка не работали») укладывается ровно в это.
+		 *
+		 * Прятаться — украшение, а не защита: показаться лишний раз поверх
+		 * палатки неприятно, спрятаться в саду — значит не работать. Поэтому
+		 * признак должен быть СИЛЬНЫМ: флаг `stadt` самой игры или накладка
+		 * с настоящим содержимым — фреймом с адресом либо видимыми потомками
+		 * с площадью.
+		 */
+		function nakladkaOtkryta(e) {
+			if (!e) return false;
+			if (getComputedStyle(e).display === 'none') return false;
+			var r = e.getBoundingClientRect();
+			if (!r.width || !r.height) return false;
+			var frames = e.querySelectorAll('iframe');
+			for (var i = 0; i < frames.length; i++) {
+				var src = frames[i].getAttribute('src') || '';
+				if (src && src !== 'about:blank') return true;
+			}
+			var kids = e.children;
+			for (var k = 0; k < kids.length; k++) {
+				if (kids[k].tagName === 'IFRAME') continue;
+				var kr = kids[k].getBoundingClientRect();
+				if (kr.width && kr.height && getComputedStyle(kids[k]).display !== 'none') return true;
+			}
+			return false;
+		}
+
+		// Почему мы не в саду. Пустая строка — в саду.
+		function prichinaSkryt() {
 			try {
-				if (window.stadt === true) return false;
+				if (window.stadt === true) return 'город (флаг stadt игры)';
 				for (var i = 0; i < NAKLADKI.length; i++) {
-					var e = document.getElementById(NAKLADKI[i]);
-					if (e && getComputedStyle(e).display !== 'none') return false;
+					if (nakladkaOtkryta(document.getElementById(NAKLADKI[i]))) {
+						return 'открыта накладка #' + NAKLADKI[i];
+					}
 				}
 			} catch (e) { /* не смогли выяснить — считаем, что в саду */ }
-			return true;
+			return '';
 		}
+
+		function vSadu() { return !prichinaSkryt(); }
 
 		function pokazat(vidno) {
 			bar.style.display = vidno ? 'block' : 'none';
 			gardens.style.display = vidno && gardensKey ? 'block' : 'none';
+		}
+
+		/*
+		 * САМООТЧЁТ. Единственное, что возвращается с чужой машины, — журнал
+		 * программы, а она сама видит лишь страницу снаружи. Поэтому панель
+		 * выкладывает своё состояние в `window.SI_HELPER`, программа
+		 * переписывает его в журнал при каждой перемене: появился ли
+		 * помощник, спрятался ли и почему, сколько садов увидел.
+		 */
+		window.SI_HELPER = { sostoyanie: 'запускаюсь' };
+
+		function soobshchit(prichina) {
+			var s;
+			try {
+				if (prichina) {
+					s = 'спрятан: ' + prichina;
+				} else {
+					s = 'в саду; гномов ' + bar.querySelectorAll('[data-si-button]').length
+						+ ', в столбике ' + gardens.querySelectorAll('img').length
+						+ ', сад ' + (currentGarden() || '?')
+						+ (inWaterGarden() ? ' (водный)' : '');
+				}
+				if (sboy) s += '; сбой — ' + sboy;
+				window.SI_HELPER.sostoyanie = s;
+			} catch (e) { /* отчёт — не повод падать */ }
 		}
 
 		function reposition() {
@@ -2146,15 +2235,44 @@
 			placeGardens();
 		}
 
+		/*
+		 * КАЖДЫЙ ШАГ ЦИКЛА — ПОД СВОЕЙ ЗАЩИТОЙ.
+		 *
+		 * `tick()` идёт раз в секунду и держит всё: палатку, признак «в
+		 * саду», столбик, расстановку. Исключение в любом шаге прежде
+		 * останавливало цикл целиком — молча и навсегда: панель оставалась
+		 * в том виде, в каком её застал сбой, а следующая перерисовка не
+		 * приходила никогда. На чужой странице шаг может подвести любой
+		 * (другая разметка, другое приложение). Теперь сбой одного шага не
+		 * трогает остальных, а его причина попадает в самоотчёт — и в журнал.
+		 */
+		var sboy = '';
+
+		function shag(gde, fn) {
+			try { fn(); return true; }
+			catch (e) {
+				sboy = gde + ': ' + ((e && e.message) ? e.message : String(e));
+				return false;
+			}
+		}
+
 		function tick() {
+			sboy = '';
 			// Палатку подхватываем ДО проверки «мы в саду»: она как раз
 			// открывается поверх сада, и каждый шаг продажи перезагружает
 			// её страницу — подвешиваться надо заново.
-			hookStall();
-			if (!vSadu()) { pokazat(false); return; }
-			hookWimps();
-			buildGardens(false);
-			reposition();
+			shag('палатка', hookStall);
+			var prichina = '';
+			shag('признак сада', function () { prichina = prichinaSkryt(); });
+			if (prichina) {
+				shag('спрятать', function () { pokazat(false); });
+				soobshchit(prichina);
+				return;
+			}
+			shag('попрошайки', hookWimps);
+			shag('столбик', function () { buildGardens(false); });
+			shag('расстановка', reposition);
+			soobshchit('');
 		}
 
 		tick();

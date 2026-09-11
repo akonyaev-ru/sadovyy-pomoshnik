@@ -783,6 +783,24 @@ var wimparea = (function () {
 	непроверенным.
 	  верхнее окно → #stadtframe (stand-stadt.html) → #shopframe (палатка)
 -->
+<!--
+	ПУСТЫЕ КОНТЕЙНЕРЫ НАКЛАДОК — КАК В ИГРЕ.
+	`#multiframe` в CSS игры не спрятан (`z-index:22; position:absolute;
+	600×400` — про display ни слова): его прячет код игры по событиям, а до
+	того он стоит на странице видимым и ПУСТЫМ. По одному `display` такой
+	контейнер неотличим от открытой накладки — на этом помощник и гас
+	целиком. `?multiframe=polny` кладёт внутрь фрейм с адресом: тогда
+	накладка открыта по-настоящему, и прятаться надо.
+-->
+<div id="multiframe" style="position:absolute; top:57px; left:80px; width:600px; height:400px; z-index:22"></div>
+<div id="citymap" style="display:none"></div>
+<script>
+	if (/[?&]multiframe=polny/.test(location.search)) {
+		document.getElementById('multiframe').innerHTML =
+			'<iframe src="stand-stadt.html" style="width:100%;height:100%;border:0"></iframe>';
+	}
+</script>
+
 <div id="stadt" style="display:none; position:fixed; left:20px; top:20px;
 	width:660px; height:420px; background:#1b2b14; border:2px solid #000; z-index:50">
 	<iframe id="stadtframe" src="about:blank" style="width:100%;height:100%;border:0"></iframe>
@@ -875,6 +893,29 @@ window.fetch = function (url, opts) {
 		<div id="wimpVerkaufButtons"><input id="wimpVerkaufYes" type="button" value="Да"></div>
 	</div>
 </div>
+
+<script>
+	// ?slomat=polosa — полоса помощников отвечает на замер исключением.
+	// Так проверяется, что сбой одного шага цикла не останавливает панель.
+	if (/[?&]slomat=polosa/.test(location.search)) {
+		var __polosa = document.getElementById('wimpareaDiv');
+		if (__polosa) {
+			__polosa.getBoundingClientRect = function () { throw new Error('сломано нарочно'); };
+		}
+	}
+</script>
+
+<script>
+	// ?pozdno=1 — игра «дописывает» свои объекты через три секунды после
+	// загрузки. Помощник обязан дождаться, а не уйти навсегда.
+	if (/[?&]pozdno=1/.test(location.search)) {
+		var __pozdnyayaIgra = gardenjs;
+		gardenjs = undefined;
+		window.addEventListener('load', function () {
+			setTimeout(function () { gardenjs = __pozdnyayaIgra; }, 3000);
+		});
+	}
+</script>
 
 <script>
 	// Панель помощника грузится только при ?panel=1 — так проверяется и

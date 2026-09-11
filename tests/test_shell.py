@@ -468,3 +468,202 @@ def test_version_flag_answers_and_does_not_touch_the_log(tmp_path, monkeypatch, 
     assert __version__ in vyvod, f"версии нет в ответе: {vyvod!r}"
     assert "Садовый помощник" in vyvod
     assert not zhurnal.exists(), "журнал тронут, хотя просили только версию"
+
+
+# ── аудит 2026-09-11: запуск без тихого Chrome ───────────────────────
+#
+# Первая живая проверка игроком: «сначала открылось одно окно, где ничего не
+# было, а потом другое». Программа не нашла приложение по трём угаданным
+# путям и МОЛЧА открыла отдельный Chrome — окно, в котором игрок войти в
+# игру не умеет. Ниже — контракт нового поведения, без Chrome и без игры.
+
+
+class _Stop(Exception):
+    """Останавливает run() там, где дальше пошёл бы настоящий запуск."""
+
+
+def _run_auto(monkeypatch, **kw):
+    """run() в режиме auto с подменёнными краями: ни Chrome, ни окон."""
+    okna = []
+    monkeypatch.setattr(app, "show_error", lambda text: okna.append(("error", text)))
+    monkeypatch.setattr(app, "show_wait", lambda text: okna.append(("wait", text)))
+    monkeypatch.setattr(app, "show_note", lambda text: okna.append(("note", text)))
+    monkeypatch.setattr(app, "_say", lambda text="": None)
+
+    def no_browser(*a, **k):
+        raise AssertionError("отдельный Chrome запускаться не должен")
+
+    monkeypatch.setattr(app.browser, "launch", no_browser)
+    return okna
+
+
+def test_auto_without_the_app_stops_loudly(monkeypatch):
+    """Приложения нет — окно с объяснением и выход, а не тихий Chrome."""
+    okna = _run_auto(monkeypatch)
+    monkeypatch.setattr(app.browser, "find_upjers",
+                        lambda report=None: (report.append("обычные места установки: нет")
+                                             if report is not None else None) or None)
+    code = app.run("https://ru.upjers.com/my-games", "panel", target="auto")
+    assert code == 3
+    assert okna and okna[0][0] == "error", f"игроку ничего не сказали: {okna}"
+    text = okna[0][1]
+    assert "upjers Home" in text and "Где искал" in text, text
+    assert "обычные места установки" in text, "в окне нет отчёта, где искали"
+
+
+def test_explicit_app_path_wins_over_the_search(monkeypatch, tmp_path):
+    """`--app путь` сильнее любого поиска — и запускается именно он."""
+    okna = _run_auto(monkeypatch)
+    exe = tmp_path / "upjers Home.exe"
+    exe.write_bytes(b"x")
+    zapusk = []
+
+    def stop_here(path, port=None):
+        zapusk.append(path)
+        raise _Stop()
+
+    monkeypatch.setattr(app.browser, "find_upjers",
+                        lambda report=None: (_ for _ in ()).throw(AssertionError("поиск не нужен")))
+    monkeypatch.setattr(app.browser, "upjers_running", lambda: [])
+    monkeypatch.setattr(app.browser, "launch_app", stop_here)
+    with pytest.raises(_Stop):
+        app.run("https://ru.upjers.com/my-games", "panel", target="auto", app_override=exe)
+    assert zapusk == [exe]
+    assert not [o for o in okna if o[0] == "error"], okna
+
+
+def test_running_app_without_a_port_waits_for_ok_then_launches(monkeypatch, tmp_path):
+    """Игра открыта без порта: просим закрыть, ждём «ОК» — и открываем сами.
+
+    Раньше здесь был выход с ошибкой и «запустите помощника снова»: лишний
+    круг, на котором игрок и путался.
+    """
+    okna = _run_auto(monkeypatch)
+    exe = tmp_path / "upjers Home.exe"
+    exe.write_bytes(b"x")
+    vyzovy = {"running": 0}
+
+    def running():
+        vyzovy["running"] += 1
+        # пока «ОК» не нажат — работает; после окна — закрыто
+        return [] if any(o[0] == "wait" for o in okna) else [4242]
+
+    def stop_here(path, port=None):
+        raise _Stop()
+
+    monkeypatch.setattr(app.browser, "find_upjers", lambda report=None: exe)
+    monkeypatch.setattr(app.browser, "upjers_running", running)
+    monkeypatch.setattr(app.browser, "debug_port_of", lambda pids: None)
+    monkeypatch.setattr(app.browser, "launch_app", stop_here)
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    with pytest.raises(_Stop):
+        app.run("https://ru.upjers.com/my-games", "panel", target="auto")
+    assert [o[0] for o in okna] == ["wait"], f"ожидалось одно окно-ожидание: {okna}"
+    assert "Выход" in okna[0][1] and "ОК" in okna[0][1], okna[0][1]
+
+
+def test_running_app_that_stays_open_after_ok_is_an_error(monkeypatch, tmp_path):
+    """Нажали «ОК», а игра всё ещё открыта — честная ошибка, не запуск."""
+    okna = _run_auto(monkeypatch)
+    exe = tmp_path / "upjers Home.exe"
+    exe.write_bytes(b"x")
+    monkeypatch.setattr(app.browser, "find_upjers", lambda report=None: exe)
+    monkeypatch.setattr(app.browser, "upjers_running", lambda: [4242])
+    monkeypatch.setattr(app.browser, "debug_port_of", lambda pids: None)
+    monkeypatch.setattr(app.browser, "launch_app",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("запуска быть не должно")))
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    code = app.run("https://ru.upjers.com/my-games", "panel", target="auto")
+    assert code == 6
+    assert [o[0] for o in okna] == ["wait", "error"], okna
+
+
+def test_log_rotation_keeps_the_previous_run(tmp_path):
+    """Прошлый журнал не затирается, а остаётся рядом как `.1.log`."""
+    log = tmp_path / "помощник.log"
+    log.write_text("первый запуск", encoding="utf-8")
+    app.rotate_log(log)
+    assert not log.exists()
+    prev = tmp_path / "помощник.1.log"
+    assert prev.read_text(encoding="utf-8") == "первый запуск"
+
+    log.write_text("второй запуск", encoding="utf-8")
+    app.rotate_log(log)
+    assert prev.read_text(encoding="utf-8") == "второй запуск", "второй запуск не заменил первый"
+
+
+def test_find_upjers_scans_any_program_subfolder(monkeypatch, tmp_path):
+    """Имя подпапки у установщика меняется — ищем во всех подпапках."""
+    programs = tmp_path / "Programs" / "upjers-playground7"
+    programs.mkdir(parents=True)
+    exe = programs / "upjers Home.exe"
+    exe.write_bytes(b"x")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "net"))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "net"))
+    report = []
+    assert browser.find_upjers(report) == exe
+    assert any("подпапка программ" in r for r in report), report
+    # найденное запоминается — в следующий раз дорогой поиск не нужен
+    assert browser.note_path().read_text(encoding="utf-8") == str(exe)
+    report2 = []
+    assert browser.find_upjers(report2) == exe
+    assert report2 and report2[0].startswith("заметка прошлого запуска: " + str(exe)), report2
+
+
+def test_find_upjers_reports_every_place_when_nothing_is_found(monkeypatch, tmp_path):
+    """Не нашли — отчёт называет каждое место, где искали."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "net"))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "net"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("PUBLIC", str(tmp_path / "net"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "net"))
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "net"))
+    monkeypatch.setattr(browser, "_powershell", lambda script, timeout=25.0: "")
+    monkeypatch.setattr(browser, "_upjers_from_registry",
+                        lambda report: report.append("реестр (установленные программы): нет"))
+    report = []
+    assert browser.find_upjers(report) is None
+    text = chr(10).join(report)
+    for mesto in ("заметка", "обычные места", "подпапки программ", "работающее приложение",
+                  "реестр", "ярлыки"):
+        assert mesto in text, f"в отчёте нет места «{mesto}»: {report}"
+
+
+def test_console_tools_never_open_a_window(monkeypatch):
+    """`tasklist`, `netstat`, `taskkill`, PowerShell — всегда без окна.
+
+    У сборки нет консоли: без флага каждый такой вызов вспыхивал пустым
+    чёрным окном на экране игрока — «окно, где ничего не было».
+    """
+    vyzovy = []
+
+    class _Out:
+        def __init__(self, stdout=""):
+            self.stdout = stdout
+            self.returncode = 0
+
+    schyot = {"tasklist": 0}
+
+    def fake_run(cmd, *a, **k):
+        vyzovy.append((cmd[0], k.get("creationflags", 0)))
+        if cmd[0] == "tasklist":
+            # первые три раза «приложение работает» — чтобы дошло до taskkill
+            schyot["tasklist"] += 1
+            if schyot["tasklist"] <= 3:
+                return _Out('"upjers Home.exe","4242","Console","1","100 K"')
+        return _Out()
+
+    monkeypatch.setattr(browser.subprocess, "run", fake_run)
+    browser.upjers_running()
+    browser.debug_port_of([4242])
+    browser.close_upjers(timeout=0.01)
+    browser._powershell("Get-Date")
+
+    assert browser.BEZ_OKNA, "на Windows флаг CREATE_NO_WINDOW должен быть ненулевым"
+    imena = {c for c, _ in vyzovy}
+    for utilita in ("tasklist", "netstat", "taskkill", "powershell"):
+        assert utilita in imena, f"вызов {utilita} не дошёл до subprocess: {vyzovy}"
+    s_oknom = [c for c, f in vyzovy if not (f & browser.BEZ_OKNA)]
+    assert not s_oknom, f"эти вызовы откроют окно: {s_oknom}"

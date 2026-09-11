@@ -498,6 +498,40 @@ class AttachedApp:
         return None
 
 
+def quit_upjers(app: Path, timeout: float = 15.0) -> bool:
+    """Штатно закрывает работающее приложение — его же командой `upjers://quit`.
+
+    ОТКУДА ЭТО. Приложение регистрирует протокол `upjers://` и слушает
+    такие ссылки вторым экземпляром: `second-instance` → `DeepLinks` →
+    команды `start`, `show`, `quit` и другие (разобрано по `app.asar`
+    2026-09-11). `quit` делает ровно то, что «Выход» в меню трея:
+    `requestAppQuit` с настоящим `app.quit()`. Это не чёрный ход, а
+    штатный вход приложения.
+
+    ЗАЧЕМ. Приложение прописывает себя в автозапуск с ключом `--hidden` и
+    у игрока с загрузки Windows висит в трее — без отладочного порта, а
+    порт нужен помощнику. `taskkill /F` закрывал его, но терял вход в игру
+    (Electron не успевал сохранить сессию). Штатный выход вход сохраняет:
+    проверено на живом приложении 2026-09-11 — после `upjers://quit` и
+    запуска с портом портал открылся на «Моих играх» без окна пароля.
+    Закрылось за 1,2 с.
+    """
+    try:
+        subprocess.Popen(
+            [str(app), "upjers://quit"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=BEZ_OKNA,
+        )
+    except Exception:
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not upjers_running():
+            return True
+        time.sleep(0.5)
+    return not upjers_running()
+
+
 def close_upjers(timeout: float = 12.0) -> int:
     """Закрывает приложение upjers Home и ждёт, пока оно действительно уйдёт.
 

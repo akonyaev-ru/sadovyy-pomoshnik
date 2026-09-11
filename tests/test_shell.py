@@ -532,15 +532,38 @@ def test_explicit_app_path_wins_over_the_search(monkeypatch, tmp_path):
     assert not [o for o in okna if o[0] == "error"], okna
 
 
-def test_running_app_without_a_port_waits_for_ok_then_launches(monkeypatch, tmp_path):
-    """Игра открыта без порта: просим закрыть, ждём «ОК» — и открываем сами.
+def test_running_app_without_a_port_is_quit_gracefully_and_relaunched(monkeypatch, tmp_path):
+    """Игра открыта без порта: закрываем её штатно, её же командой, и открываем сами.
 
-    Раньше здесь был выход с ошибкой и «запустите помощника снова»: лишний
-    круг, на котором игрок и путался.
+    Приложение прописывает себя в автозапуск с `--hidden` и у игрока висит в
+    трее с загрузки — это не редкость, а каждый день. Никаких окон: команда
+    `upjers://quit` делает то же, что «Выход» в трее, и вход сохраняется.
     """
     okna = _run_auto(monkeypatch)
     exe = tmp_path / "upjers Home.exe"
     exe.write_bytes(b"x")
+    zakryto = []
+
+    def stop_here(path, port=None):
+        raise _Stop()
+
+    monkeypatch.setattr(app.browser, "find_upjers", lambda report=None: exe)
+    monkeypatch.setattr(app.browser, "upjers_running", lambda: [4242])
+    monkeypatch.setattr(app.browser, "debug_port_of", lambda pids: None)
+    monkeypatch.setattr(app.browser, "quit_upjers", lambda path, timeout=15.0: zakryto.append(path) or True)
+    monkeypatch.setattr(app.browser, "launch_app", stop_here)
+    with pytest.raises(_Stop):
+        app.run("https://ru.upjers.com/my-games", "panel", target="auto")
+    assert zakryto == [exe], "штатное закрытие не позвали"
+    assert okna == [], f"игроку не должно быть показано ни одного окна: {okna}"
+
+
+def test_running_app_without_a_port_waits_for_ok_when_graceful_quit_fails(monkeypatch, tmp_path):
+    """Штатно закрыть не вышло — запасной путь: просим закрыть, ждём «ОК», открываем сами."""
+    okna = _run_auto(monkeypatch)
+    exe = tmp_path / "upjers Home.exe"
+    exe.write_bytes(b"x")
+    monkeypatch.setattr(app.browser, "quit_upjers", lambda path, timeout=15.0: False)
     vyzovy = {"running": 0}
 
     def running():
@@ -570,6 +593,7 @@ def test_running_app_that_stays_open_after_ok_is_an_error(monkeypatch, tmp_path)
     monkeypatch.setattr(app.browser, "find_upjers", lambda report=None: exe)
     monkeypatch.setattr(app.browser, "upjers_running", lambda: [4242])
     monkeypatch.setattr(app.browser, "debug_port_of", lambda pids: None)
+    monkeypatch.setattr(app.browser, "quit_upjers", lambda path, timeout=15.0: False)
     monkeypatch.setattr(app.browser, "launch_app",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("запуска быть не должно")))
     monkeypatch.setattr(app.time, "sleep", lambda s: None)
@@ -744,3 +768,122 @@ def test_login_reminder_stays_silent_when_the_game_is_seen(monkeypatch):
         states = {"a": "страница без игры: ru.upjers.com", "b": state}
         assert app._napomnit_vhod(states, 0.0, False) is False, state
     assert okna == []
+
+
+def test_quit_upjers_sends_the_apps_own_command_without_a_window(monkeypatch, tmp_path):
+    """`quit_upjers` шлёт `upjers://quit` вторым экземпляром — без окна — и ждёт выхода."""
+    exe = tmp_path / "upjers Home.exe"
+    exe.write_bytes(b"x")
+    zapusk = []
+
+    class _P:
+        pass
+
+    def fake_popen(cmd, *a, **k):
+        zapusk.append((cmd, k.get("creationflags", 0)))
+        return _P()
+
+    schyot = {"n": 0}
+
+    def running():
+        schyot["n"] += 1
+        return [4242] if schyot["n"] < 3 else []
+
+    monkeypatch.setattr(browser.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(browser, "upjers_running", running)
+    monkeypatch.setattr(browser.time, "sleep", lambda s: None)
+    assert browser.quit_upjers(exe, timeout=5.0) is True
+    assert zapusk == [([str(exe), "upjers://quit"], browser.BEZ_OKNA)], zapusk
+
+
+def test_quit_upjers_reports_failure_when_the_app_stays(monkeypatch, tmp_path):
+    """Приложение не вышло за отведённое время — честное «не вышло», не «готово»."""
+    exe = tmp_path / "upjers Home.exe"
+    exe.write_bytes(b"x")
+    monkeypatch.setattr(browser.subprocess, "Popen", lambda *a, **k: object())
+    monkeypatch.setattr(browser, "upjers_running", lambda: [4242])
+    now = {"t": 0.0}
+
+    def tick():
+        now["t"] += 0.5
+        return now["t"]
+
+    monkeypatch.setattr(browser.time, "monotonic", tick)
+    monkeypatch.setattr(browser.time, "sleep", lambda s: None)
+    assert browser.quit_upjers(exe, timeout=3.0) is False
+
+
+# ── игра в отдельном окне приложения ─────────────────────────────────
+#
+# Живой прогон 2026-09-11 на аккаунте игрока: приложение открывает игру в
+# ОТДЕЛЬНОМ окне, вкладка портала остаётся на «Моих играх». Признак «игра
+# открыта» должен быть общим на все вкладки, иначе портал открывает игру
+# снова и снова.
+
+
+class _FakeConn:
+    """Подключение, которое лишь записывает, что у него спрашивали."""
+
+    def __init__(self, href="https://ru.upjers.com/my-games"):
+        self.href = href
+        self.calls = []
+
+    def evaluate(self, expr):
+        self.calls.append(("evaluate", expr[:40]))
+        if expr == "location.href":
+            return self.href
+        return ""
+
+    def call(self, method, params=None, timeout=None):
+        self.calls.append((method, params))
+        return {}
+
+
+def test_game_open_in_another_window_stops_every_attempt(monkeypatch):
+    monkeypatch.setattr(app, "_say", lambda text="": None)
+    opened = {}
+    states = {"portal": "страница без игры: ru.upjers.com", "igra": "в саду; гномов 4"}
+    app._otmetit_igru(opened, states)
+    assert opened.get("_igra") is True
+
+    conn = _FakeConn()
+    app._open_game_once(conn, opened, "portal", True)
+    assert conn.calls == [], f"игра открыта — портал трогать нельзя: {conn.calls}"
+
+
+def test_click_fallback_waits_while_the_game_loads_elsewhere(monkeypatch):
+    """Нажали, портал остался, но игра грузится в другом окне — не переходим."""
+    monkeypatch.setattr(app, "_say", lambda text="": None)
+    now = {"t": 100.0}
+    monkeypatch.setattr(app.time, "monotonic", lambda: now["t"])
+    opened = {"portal": {"tries": 1, "done": False, "went": False,
+                         "ssylka": "/play/42384029", "kogda": 80.0}}
+    app._otmetit_igru(opened, {"igra": "жду игру (объектов игры на странице ещё нет)"})
+    assert opened["_zhdu"] is True
+
+    conn = _FakeConn()
+    app._open_game_once(conn, opened, "portal", True)
+    assert not [c for c in conn.calls if c[0] == "Page.navigate"], (
+        f"перешли по ссылке, хотя игра уже грузится в другом окне: {conn.calls}")
+
+    # игра не грузится нигде и прошло больше 6 с — запасной переход законен
+    app._otmetit_igru(opened, {"igra": "страница без игры: ru.upjers.com"})
+    conn2 = _FakeConn()
+    app._open_game_once(conn2, opened, "portal", True)
+    assert [c for c in conn2.calls if c[0] == "Page.navigate"], "запасной переход не сработал"
+
+
+def test_game_found_in_a_tab_marks_it_open_for_everyone(monkeypatch):
+    """Вкладка на узле игры с `gardenjs` — общий признак ставится сразу."""
+    monkeypatch.setattr(app, "_say", lambda text="": None)
+
+    class _GameConn(_FakeConn):
+        def evaluate(self, expr):
+            self.calls.append(("evaluate", expr[:40]))
+            if expr == "location.href":
+                return "https://s5.ru.molehillempire.com/main.php?page=garden"
+            return True      # typeof gardenjs !== 'undefined'
+
+    opened = {}
+    app._open_game_once(_GameConn(), opened, "igra", True)
+    assert opened.get("_igra") is True

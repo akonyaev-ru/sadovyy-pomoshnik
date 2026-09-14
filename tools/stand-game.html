@@ -338,6 +338,7 @@ var quicknavi = { data: {} };
 if (!/[?&]sady_neizvestny=1/.test(location.search)) {
 	for (var _g = 1; _g <= window.__sadov; _g++) quicknavi.data['garden' + _g] = _g;
 	quicknavi.data.greenhouse = 1;   // не сад: в ряд попасть не должно
+	quicknavi.data.watergarden = 1;  // водный сад у игрока есть — обход обязан его пройти
 	/*
 	 * Грибы и улитки. Игра перечисляет в быстрой навигации только то, что
 	 * игроку доступно, — и мы рисуем кнопку лишь на такое. Режим
@@ -633,6 +634,18 @@ console.log('стенд готов: ожидается политых расте
      ═══════════════════════════════════════════════════════════════ -->
 <div id="watergarden_container" style="display:none;margin-top:12px">
 	<h1 style="font-size:14px;margin:0 0 6px">Водный сад</h1>
+	<!--
+		Своя панель водного сада. Замер живой игры 2026-09-14: кнопка
+		`watergarden.harvestAll()` стоит здесь с классом `link`, без `off`
+		и без замка — значит игроку доступна. `?wg_zhnec=net` её запирает:
+		тогда помощник обязан собирать сам, клетка за клеткой.
+	-->
+	<div id="wgPanel" style="margin:0 0 6px">
+		<span class="link" onclick="watergarden.harvestAll();"
+		      style="display:inline-block;width:40px;height:24px;background:#2a7ba8"></span>
+		<span class="link" onclick="watergarden.autoplantOpen();"
+		      style="display:inline-block;width:40px;height:24px;background:#3a6b48"></span>
+	</div>
 	<div id="wgGrid" style="display:grid;grid-template-columns:repeat(17, 26px);gap:1px;width:max-content"></div>
 </div>
 
@@ -725,6 +738,12 @@ var watergarden = (function () {
 			out[kinds[k]] = list.slice();
 			any = true;
 		}
+		// Собранное действительно уходит с грядки: иначе повторный сбор
+		// находил бы то же самое снова.
+		if (out.harvest && out.harvest.length) {
+			out.harvest.forEach(function (n) { my.grid[n] = []; });
+		}
+
 		cacheContainer = {}; cacheCount = 0;
 		if (any) window.__sent.push(out);
 
@@ -768,12 +787,59 @@ var watergarden = (function () {
 
 	my.water = function (a) { my.cache(my.grid[a][0], a, 'water'); };
 
-	// Серверные «одним запросом». Почти наверняка платные — звать их нельзя.
-	my.waterAll   = function () { window.__danger.push('watergardenWaterAll'); };
-	my.harvestAll = function () { window.__danger.push('watergardenHarvestAll'); };
+	/*
+	 * harvest — из игры без изменений по смыслу: НЕДОЗРЕВШЕЕ показывает окно
+	 * «действительно собрать?» (`#wgerntepopup`), и сбор через него теряет
+	 * урожай. Для нас такое окно — опасность, помощник обязан его не
+	 * вызывать.
+	 */
+	my.harvest = function (b) {
+		var a = my.grid[b];
+		if (!a || !a[0]) { window.__danger.push('сбор пустой клетки ' + b); return; }
+		if ((a[10] || 0) + (a[11] || 0) + my.timeSinceLastSync < a[3]) {
+			window.__danger.push('окно сбора в водном ' + b);
+			return;
+		}
+		my.cache(a[0], b, 'harvest');
+	};
 
-	my.open = function () { my.isOpen = true; window.currentGarden = 101; };
-	my.close = function () { my.isOpen = false; window.currentGarden = 1; };
+	/*
+	 * «Собрать всё» водного сада. Доступно, только пока его кнопка не
+	 * заперта: право лежит в разметке, а метод есть всегда. Ответ приходит
+	 * С ЗАДЕРЖКОЙ — обход обязан дождаться.
+	 */
+	my.harvestAll = function () {
+		var к = document.querySelector('#wgPanel .link');
+		if (!к || /(^|\s)off(\s|$)/.test(к.className || '')) {
+			window.__danger.push('собрать всё в водном заперто, а его позвали');
+			return;
+		}
+		setTimeout(function () {
+			var убрано = [];
+			for (var i = 1; i <= 204; i++) {
+				var c = my.grid[i];
+				if (!c || !c[0]) continue;
+				var d = data_products[c[0]];
+				if (!d || d.category !== 'w') continue;
+				if ((c[10] || 0) + (c[11] || 0) + my.timeSinceLastSync < c[3]) continue;
+				убрано.push(i);
+				my.grid[i] = [];
+			}
+			window.__sent.push({ file: 'watergardenHarvestAll', felder: убрано });
+		}, 400);
+	};
+
+	// Серверный полив «одним запросом» — платный, звать нельзя.
+	my.waterAll = function () { window.__danger.push('watergardenWaterAll'); };
+
+	my.open = function () {
+		my.isOpen = true; window.currentGarden = 101;
+		document.getElementById('watergarden_container').style.display = 'block';
+	};
+	my.close = function () {
+		my.isOpen = false; window.currentGarden = 0;   // как в игре
+		document.getElementById('watergarden_container').style.display = 'none';
+	};
 
 	return my;
 })();
@@ -812,7 +878,21 @@ window.WG_FREE_WATER = [];      // свободные клетки «вода» 
 	put(26, 303, 500, 0, 999999);             // украшение — не трогать
 	put(5,  302, 100, 0, 1800);               // камыш на берегу → ПОЛИТЬ
 
+	// ── СОЗРЕВШЕЕ: то, что сбор обязан взять ──────────────────────
+	put(40, 300, 5000, 0, 3600);              // созрело → СОБРАТЬ
+	put(41, 300, 5000, 0, 3600);              // созрело → СОБРАТЬ
+	// клетка 24 уже созрела выше (возраст 4000 при спелости 3600)
+
+	/*
+	 * ЛОВУШКА: СОЗРЕВШИЙ СОРНЯК. По возрасту он «поспел», и сбор без
+	 * проверки вида полез бы в него — а уборка сорняка в водном саду
+	 * платная (`watergardenRemoveWeedCosts`). Без этой клетки стенд был бы
+	 * добрее игры: сорняк 25 никогда не поспевает и до него не доходит.
+	 */
+	put(45, 304, 5000, 0, 1000);
+
 	window.WG_EXPECTED = [5, 20, 22];
+	window.WG_SOZRELO = [24, 40, 41];
 
 	for (n = 1; n <= 204; n++) {
 		if (watergarden.gridDefinition[n] !== 'water') continue;
@@ -985,6 +1065,10 @@ var wimparea = (function () {
 <div id="multiframe" style="position:absolute; top:57px; left:80px; width:600px; height:400px; z-index:22"></div>
 <div id="citymap" style="display:none"></div>
 <script>
+	if (/[?&]wg_zhnec=net/.test(location.search)) {
+		var _wz = document.querySelector('#wgPanel .link');
+		if (_wz) _wz.className = 'link off';
+	}
 	if (/[?&]zhnec=net/.test(location.search)) {
 		var _zh = document.querySelector('#wimpareaHelper .harvest');
 		if (_zh) _zh.className = 'link harvest off';

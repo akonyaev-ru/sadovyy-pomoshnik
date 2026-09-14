@@ -1541,21 +1541,45 @@ def test_harvest_skips_a_plant_the_game_would_ask_about(server):
         assert s["danger"] == [], f"игра показала бы окно: {s['danger']}"
 
 
-def test_harvest_refuses_in_the_water_garden(server):
-    """В водном саду сбор не делаем: там свой объект игры.
+def test_harvest_in_the_water_garden_takes_only_ripe_water_plants(server):
+    """Сбор в водном саду: берём созревшее и не трогаем сорняк.
 
-    Работать здесь через `gardenjs` значило бы собирать вслепую в невидимом
-    обычном саду — та самая ошибка, что чинилась в 3.4.0. Стенд открываем
-    БЕЗ жнеца игры: иначе своей кнопки сбора не будет и нажимать окажется
-    нечего — проверка была бы пустой.
+    В стенде созревших три — 24, 40, 41. Рядом лежит СОЗРЕВШИЙ ПО ВОЗРАСТУ
+    сорняк (45): уборка сорняка в водном саду платная, и сбор без проверки
+    вида полез бы в него. Недозревшие рядом тоже есть — на них игра показала
+    бы окно «действительно собрать?», и урожай бы пропал.
+
+    Кнопку «собрать всё» водного сада запираем (`wg_zhnec=net`): иначе сбор
+    пойдёт ею, и проверка клетка за клеткой не состоится.
     """
-    with stand(server, "?wg=1&zhnec=net") as conn:
+    with stand(server, "?wg=1&wg_zhnec=net") as conn:
         _wait(conn, "window.watergarden && watergarden.isOpen === true", "водный сад не открылся")
         _wait(conn, "!!document.querySelector('#si-helper [data-si-button=harvest]')",
               "своей кнопки сбора нет")
         _press(conn, "harvest")
-        _wait(conn, "/водном саду/.test(" + _status_expr() + ")", "не отказался в водном саду")
-        assert conn.evaluate("window.__danger") == [], "тронули обычный сад из водного"
+        _wait(conn, "/Собрано|Созревшего/.test(" + _status_expr() + ")", "сбор не завершился")
+        собрано = conn.evaluate("""(function(){
+            var o=[]; window.__sent.forEach(function(s){
+                (s.harvest||[]).forEach(function(n){o.push(n)});
+            });
+            return o.sort(function(a,b){return a-b});
+        })()""")
+        assert собрано == [24, 40, 41], f"собрано не то: {собрано}"
+        assert conn.evaluate("window.__danger") == [], "сбор задел опасное"
+        assert conn.evaluate("window.__cacheCalls") == 0, "тронули обычный сад из водного"
+
+
+def test_water_garden_harvest_uses_its_own_button_when_it_is_free(server):
+    """Кнопка «собрать всё» водного сада свободна — зовём её, а не двести клеток.
+
+    Право лежит в разметке: метод есть всегда, а кнопка бывает заперта.
+    Замер живой игры 2026-09-14: она свободна.
+    """
+    with stand(server, "?wg=1") as conn:
+        _wait(conn, "window.watergarden && watergarden.isOpen === true", "водный сад не открылся")
+        assert conn.evaluate(
+            "!document.querySelector('#si-helper [data-si-button=harvest]')"
+        ), "нарисовали свой сбор поверх свободной кнопки игры"
 
 
 def test_round_walks_every_garden_and_does_the_work(game):
@@ -1576,9 +1600,24 @@ def test_round_walks_every_garden_and_does_the_work(game):
     # жнец игры нанят — звали его, а не собирали руками
     assert s["ernte"] == [], f"собирали руками при нанятом жнеце: {s['ernte']}"
     собрано = sum(z["клеток"] for z in s["zhnec"])
-    assert собрано == 10, f"собрано не то: {s['zhnec']}"
-    assert s["wasser"] == 16, f"полито не то: {s['wasser']}"
-    assert "собрано 10" in итог and "полито 16" in итог, итог
+    assert собрано == 10, f"по обычным садам собрано не то: {s['zhnec']}"
+    assert s["wasser"] == 16, f"по обычным садам полито не то: {s['wasser']}"
+
+    # Водный сад — последняя остановка. Там своя очередь и своя кнопка
+    # «собрать всё»: созревших три (24, 40, 41), полить три (5, 20, 22).
+    водный = game.evaluate("""(function(){
+        var собрано=0, полито=0;
+        window.__sent.forEach(function(x){
+            if(x.file==='watergardenHarvestAll') собрано += x.felder.length;
+            if(x.file==='watergardenCache' && x.water) полито += x.water.length;
+        });
+        return {собрано:собрано, полито:полито};
+    })()""")
+    assert водный["собрано"] == 3, f"в водном саду собрано не то: {водный}"
+    assert водный["полито"] >= 3, f"в водном саду полито не то: {водный}"
+
+    assert "собрано 13" in итог and "полито 19" in итог, итог
+    assert "Водный сад тоже" in итог, итог
     assert "Семена не выбраны" in итог, итог
     # побывали во всех садах и вернулись в первый
     assert s["switches"][-1] == 1, f"не вернулись в исходный сад: {s['switches']}"
@@ -1618,5 +1657,6 @@ def test_round_refuses_in_the_water_garden(water_stand):
     """Обход идёт по обычным садам: из водного — отказ словами."""
     conn = water_stand
     _press(conn, "round")
-    _wait(conn, "/водного сада/.test(" + _status_expr() + ")", "не отказался в водном саду")
+    _wait(conn, "/водный он обойдёт сам/.test(" + _status_expr() + ")",
+          "не подсказал начать обход из обычного сада")
     assert conn.evaluate("window.__gardenSwitches.length") == 0, "переключал сады из водного"

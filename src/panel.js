@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Садовый помощник
 // @namespace    si-helper
-// @version      2026.5
+// @version      2026.6
 // @description  Кнопки-помощники внутри игры. Действует только по нажатию.
 // @match        https://*.molehillempire.com/*
 // @match        https://*.sadowajaimperija.ru/*
@@ -286,6 +286,100 @@
 				if (c && c[0]) return false;                 // занято
 			}
 			return true;
+		}
+
+		/*
+		 * СБОР В ВОДНОМ САДУ — правило из её `watergarden.harvest(n)`:
+		 *   age = c[10] + c[11] + timeSinceLastSync
+		 *   age < c[3]  → окно «действительно собрать?» (не созрело)
+		 *   иначе       → cache(pid, n, 'harvest')
+		 * Значит созревшим считается `age >= c[3]`.
+		 *
+		 * Категорию проверяем сами и строго: в водном саду 'u' — сорняк, а
+		 * его уборка платная (`watergardenRemoveWeedCosts`), 'wd' —
+		 * украшение, собирать там нечего.
+		 */
+		function wgCanHarvest(w, n) {
+			var c = w.grid[n];
+			if (!c || !c[0]) return false;
+			var d = window.data_products && window.data_products[c[0]];
+			if (!d || d.category !== 'w') return false;
+			if (!c[3]) return false;
+			return wgAge(c) >= c[3];
+		}
+
+		function wgRipeCells() {
+			var w = waterGarden();
+			if (!w || !w.grid) return 0;
+			var n = 0;
+			for (var i = 1; i <= CELLS; i++) if (wgCanHarvest(w, i)) n++;
+			return n;
+		}
+
+		/*
+		 * Есть ли у водного сада своя СВОБОДНАЯ кнопка «собрать всё».
+		 *
+		 * Судим по разметке, а не по наличию метода: метод есть всегда, а
+		 * право — нет. Замер живой игры 2026-09-14: кнопка
+		 * `watergarden.harvestAll()` стоит в его панели с классом `link`,
+		 * без `off` и без замка, то есть игроку доступна.
+		 */
+		function wgHarvestAllReady() {
+			try {
+				var el = document.querySelectorAll('#watergarden_container [class*=link]');
+				for (var i = 0; i < el.length; i++) {
+					var oc = el[i].getAttribute('onclick') || '';
+					if (oc.indexOf('harvestAll') === -1) continue;
+					if (/(^|\s)off(\s|$)/.test(el[i].className || '')) return false;
+					if (el[i].querySelector && el[i].querySelector('.locked')) return false;
+					return true;
+				}
+			} catch (e) { /* разметка могла смениться — считаем, что кнопки нет */ }
+			return false;
+		}
+
+		function harvestAllWater() {
+			var w = waterGarden();
+			var problem = wgReady(w);
+			if (problem) return Promise.reject(new Error(problem));
+			if (typeof w.harvest !== 'function') {
+				return Promise.reject(new Error('Водный сад не даёт собирать.'));
+			}
+
+			var done = {}, harvested = 0, ripe = wgRipeCells();
+
+			var i = 1;
+			function step() {
+				for (; i <= CELLS; i++) {
+					if (done[i]) continue;
+					done[i] = true;
+					var c = w.grid[i];
+					if (!c || !c[0]) continue;
+
+					var cells = wgCells(w, i), k, suitable = true;
+					for (k = 0; k < cells.length; k++) {
+						if (!wgCanHarvest(w, cells[k])) { suitable = false; break; }
+					}
+					for (k = 0; k < cells.length; k++) done[cells[k]] = true;
+					if (!suitable) continue;
+
+					// Собираем по ЛЕВОЙ ВЕРХНЕЙ клетке растения: её `harvest`
+					// сама разложит действие на всю площадь.
+					try { w.harvest(cells[0]); } catch (e) { continue; }
+					harvested++;
+					notify.wait('Собираю… ' + harvested);
+					i++;
+					return sleep(PACE_MS).then(step);
+				}
+				return Promise.resolve();
+			}
+
+			function flush() { try { w.sendCache(); } catch (e) { /* очередь уйдёт сама */ } }
+
+			return step().then(function () {
+				flush();
+				return { harvested: harvested, ripe: ripe };
+			}, function (err) { flush(); throw err; });
 		}
 
 		function wgReady(w) {
@@ -912,16 +1006,12 @@
 
 		function runHarvesting() {
 			if (running) return;
-			// В водном саду СВОЙ объект игры и своя очередь. Работать здесь
-			// через `gardenjs` значило бы собирать вслепую в невидимом
-			// обычном саду — та самая ошибка, что чинилась в 3.4.0.
-			if (inWaterGarden()) {
-				notify.error('Сбор в водном саду я пока не делаю — соберите там сами.');
-				return;
-			}
 			busy(true);
 			notify.wait('Идёт сбор…');
-			harvestAll().then(function (res) {
+			// В водном саду СВОЙ объект игры и своя очередь: работать там
+			// через `gardenjs` значило бы собирать вслепую в невидимом
+			// обычном саду — ошибка, что чинилась в 3.4.0.
+			(inWaterGarden() ? harvestAllWater() : harvestAll()).then(function (res) {
 				if (res.harvested) {
 					notify.info('Собрано ' + res.harvested + ' ' +
 						plural(res.harvested, 'растение', 'растения', 'растений'));
@@ -982,10 +1072,64 @@
 			);
 		}
 
+		/*
+		 * Водный сад — последняя остановка обхода.
+		 *
+		 * Он у игры ОТДЕЛЬНЫЙ объект со своей очередью, поэтому и работа в
+		 * нём своя: `harvestAllWater`, `plantAllWater`, `waterAllWater`.
+		 * Семена там тоже свои (категория 'w'), и спрашиваем мы их уже
+		 * ПОСЛЕ входа — иначе проверка сравнивала бы с овощами.
+		 * Нет водного сада у игрока — молча пропускаем.
+		 */
+		function harvestHereWater() {
+			var before = wgRipeCells();
+			if (!before) return Promise.resolve({ harvested: 0 });
+			if (!wgHarvestAllReady()) return harvestAllWater();
+			try { waterGarden().harvestAll(); }
+			catch (e) { return harvestAllWater(); }
+			return waitFor(function () { return wgRipeCells() === 0; }, 20000).then(
+				function () { return { harvested: before }; },
+				function () { return { harvested: 0 }; }
+			);
+		}
+
+		function roundWaterGarden(итог) {
+			var w = waterGarden();
+			if (!w || typeof w.open !== 'function' || !hasLocation('watergarden')) {
+				return Promise.resolve();
+			}
+			try { w.open(); } catch (e) { return Promise.resolve(); }
+
+			function закрыть() { try { w.close(); } catch (e) { /* уже закрыт */ } }
+
+			return waitFor(function () { return inWaterGarden() && !!w.grid; }, 25000)
+				.then(function () {
+					notify.wait('Собираю (водный сад)');
+					return harvestHereWater();
+				})
+				.then(function (r) {
+					итог.собрано += (r && r.harvested) || 0;
+					var pid = currentSeed();
+					if (!pid) return null;
+					notify.wait('Сажаю (водный сад)');
+					return plantAllWater(pid).then(null, function () { return null; });
+				})
+				.then(function (r) {
+					итог.посажено += (r && r.planted) || 0;
+					notify.wait('Поливаю (водный сад)');
+					return waterAllWater();
+				})
+				.then(function (r) {
+					итог.полито += (r && r.watered) || 0;
+					итог.водный = true;
+					закрыть();
+				}, function (err) { закрыть(); throw err; });
+		}
+
 		function runRound() {
 			if (running) return;
 			if (inWaterGarden()) {
-				notify.error('Обход идёт по обычным садам. Выйдите из водного сада.');
+				notify.error('Начните обход из обычного сада — водный он обойдёт сам.');
 				return;
 			}
 			var list = ownedGardens();
@@ -1029,12 +1173,15 @@
 			}
 
 			шаг().then(function () {
+				return roundWaterGarden(итог);
+			}).then(function () {
 				// Возвращаем игрока туда, откуда он начал.
 				return домой ? goToGarden(домой).then(null, function () { return null; }) : null;
 			}).then(function () {
 				var s = 'Обход ' + итог.садов + ' ' +
 					plural(итог.садов, 'сада', 'садов', 'садов') + ': собрано ' +
 					итог.собрано + ', посажено ' + итог.посажено + ', полито ' + итог.полито + '.';
+				if (итог.водный) s += ' Водный сад тоже.';
 				if (!pid) s += ' Семена не выбраны — не сажал.';
 				notify.info(s);
 				if (painted) paint(true);
@@ -1946,8 +2093,14 @@
 		 * можно нанять и можно лишиться, и решать это надо каждый круг, а
 		 * не один раз при запуске.
 		 */
+		// Кем сбор уже закрыт: в обычном саду — жнецом игры, в водном — его
+		// собственной кнопкой «собрать всё».
+		function harvestCovered() {
+			return inWaterGarden() ? wgHarvestAllReady() : gameHarvestHired();
+		}
+
 		function syncHarvestButton() {
-			var нужен = !gameHarvestHired();
+			var нужен = !harvestCovered();
 			var есть = !!btnHarvest.parentNode;
 			if (нужен && !есть) bar.appendChild(btnHarvest);
 			else if (!нужен && есть) btnHarvest.parentNode.removeChild(btnHarvest);

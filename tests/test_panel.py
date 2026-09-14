@@ -282,7 +282,7 @@ def test_no_permanent_box(game):
         "return {fon:s.backgroundColor, ramka:s.borderTopWidth,"
         " kn:b.querySelectorAll('[data-si-button]').length}})()"
     )
-    assert box["kn"] == 4, f"кнопок должно быть 4: {box}"
+    assert box["kn"] == 5, f"кнопок должно быть 5: {box}"
     assert box["fon"] in ("rgba(0, 0, 0, 0)", "transparent"), f"у строки есть фон: {box}"
     assert box["ramka"] in ("0px", ""), f"у строки есть рамка: {box}"
 
@@ -455,13 +455,13 @@ def test_buttons_are_the_games_own_gnomes(server):
     """
     # Без автомата игры помощник рисует своего жука — тут и проверяем набор.
     with stand(server, "?bez_avtomata=1") as conn:
-        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button]').length===4",
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button]').length===5",
               "кнопки не появились")
         srcs = conn.evaluate(
             "(function(){var a=document.querySelectorAll('#si-helper [data-si-button]'),o=[];"
             "for(var i=0;i<a.length;i++)o.push(a[i].getAttribute('src')||'');return o})()"
         )
-    assert len(srcs) == 4, f"кнопок-картинок должно быть 4: {srcs}"
+    assert len(srcs) == 5, f"кнопок-картинок должно быть 5: {srcs}"
 
     joined = " ".join(srcs)
     assert "kannenzwerg.gif" in joined, "нет гнома с лейкой — того самого, что был у Ивана"
@@ -471,6 +471,10 @@ def test_buttons_are_the_games_own_gnomes(server):
     )
     assert "questzwerg_klein.png" in joined, "нет гнома с фонарём"
     assert "marktplatz_neu.png" in joined, "нет рыночной площади — быстрой продажи"
+    assert "boosterzwerg_klein.png" in joined, "нет гнома-ускорителя — обхода всех садов"
+    # Жнец игры в стенде НАНЯТ, значит своего жнеца рисовать нельзя:
+    # два жнеца в полосе — та же ошибка, что была с двумя жуками.
+    assert "sensenzwerg.gif" not in joined, "свой жнец при нанятом жнеце игры — это второй жнец"
     assert "sonne.gif" not in joined, "вернулось солнце — оно выбивалось из ряда гномов"
     for s in srcs:
         assert s.startswith("http"), f"путь к картинке игры должен быть полным: {s}"
@@ -1322,7 +1326,7 @@ def test_panel_reports_its_own_state(game):
           "гномы не появились")
     _wait(game, "/^в саду/.test((window.SI_HELPER||{}).sostoyanie||'')", "состояние не выложено")
     state = game.evaluate("window.SI_HELPER.sostoyanie")
-    assert "гномов 4" in state, f"число гномов не сходится: {state}"
+    assert "гномов 5" in state, f"число гномов не сходится: {state}"
     assert "столбике" in state and "сад 1" in state, f"в состоянии нет садов: {state}"
 
     game.evaluate("zeigeStadtMain(1); true")
@@ -1453,3 +1457,166 @@ def test_own_beetle_comes_back_when_the_games_one_disappears(game):
     })()""")
     assert "anpflanzautomat" in r["src"], f"свой жук не вернул картинку: {r}"
     assert r["w"] == 45 and r["h"] == 45, f"свой жук не вернул размер: {r}"
+
+
+# ── сбор урожая и обход всех садов (2026-09-14) ──────────────────────
+#
+# Замер живой игры: у игрока ПЯТЬ садов и в каждом по 204 созревших. Жнец
+# игры у него НАНЯТ (`.harvest` без `off`, onclick `gardenjs.harvestAll()`),
+# а поливальщик нет. Отсюда два правила, которые тут и проверяются:
+#   • пока жнец игры нанят, своей кнопки сбора быть не должно — иначе в
+#     полосе окажется два жнеца, как было с двумя жуками;
+#   • обход должен звать ЕЁ жнеца, когда он нанят, и собирать сам, когда нет.
+#
+# В стенде сады 2–5 маленькие по делу: созрело 2+1+0+3, сухо 1+2+1+0.
+# Вместе с садом 1 (созрело 4, полить 12) обход без семян даёт
+# собрано 10, полито 16.
+
+
+def _svodka(conn):
+    """Что ушло бы на сервер: сбор своими руками, сбор жнецом, полив."""
+    return conn.evaluate("""(function(){
+        var ernte=[], zhnec=[], wasser=[];
+        window.__sent.forEach(function(s){
+            if(s.file==='ernte') s.felder.forEach(function(n){ernte.push(n)});
+            if(s.file==='harvestAll') zhnec.push({сад:s.сад, клеток:s.felder.length});
+            if(s.file==='wasser') s.felder.forEach(function(n){wasser.push(n)});
+        });
+        return {ernte:ernte.sort(function(a,b){return a-b}), zhnec:zhnec, wasser:wasser.length,
+                danger:window.__danger, switches:window.__gardenSwitches};
+    })()""")
+
+
+def test_harvest_button_hidden_while_the_game_reaper_is_hired(game):
+    """Жнец игры нанят — своего не рисуем вовсе."""
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button]').length>0",
+          "гномы не появились")
+    assert game.evaluate(
+        "!document.querySelector('#si-helper [data-si-button=harvest]')"
+    ), "при нанятом жнеце игры в полосе появился второй жнец"
+
+
+def test_harvest_button_appears_when_the_reaper_is_not_hired(server):
+    """Жнеца игры нет — своя кнопка сбора появляется, и это её картинка."""
+    with stand(server, "?zhnec=net") as conn:
+        _wait(conn, "!!document.querySelector('#si-helper [data-si-button=harvest]')",
+              "своя кнопка сбора не появилась")
+        src = conn.evaluate(
+            "document.querySelector('#si-helper [data-si-button=harvest]').getAttribute('src')")
+        assert "sensenzwerg.gif" in src, f"жнец нарисован не картинкой игры: {src}"
+
+
+def test_harvest_takes_only_ripe_vegetables(server):
+    """Собираем ровно созревшие овощи и не трогаем опасное.
+
+    В саду стенда созревших четыре: 9, 10, 25, 26. Рядом лежат постройка
+    (платный снос), трава с сорняком (молчаливая прополка) и растение из
+    списка ускорения — всё это сбор обязан обойти.
+    """
+    with stand(server, "?zhnec=net") as conn:
+        _wait(conn, "!!document.querySelector('#si-helper [data-si-button=harvest]')",
+              "своя кнопка сбора не появилась")
+        _press(conn, "harvest")
+        _wait(conn, "/Собрано|Созревшего/.test(" + _status_expr() + ")", "сбор не завершился")
+        s = _svodka(conn)
+        assert s["ernte"] == [9, 10, 25, 26], f"собрано не то: {s['ernte']}"
+        assert s["danger"] == [], f"сбор задел опасное: {s['danger']}"
+        assert "Собрано 4" in _status(conn), _status(conn)
+
+
+def test_harvest_skips_a_plant_the_game_would_ask_about(server):
+    """Клетка созрела по данным, а картинка говорит «не выросло» — не трогаем.
+
+    На такой игра показывает окно «действительно собрать?», и сбор потерял бы
+    урожай. Стенд ставит этот рассинхрон на клетку 9.
+    """
+    with stand(server, "?zhnec=net&nedozrelo=1") as conn:
+        _wait(conn, "!!document.querySelector('#si-helper [data-si-button=harvest]')",
+              "своя кнопка сбора не появилась")
+        _press(conn, "harvest")
+        _wait(conn, "/Собрано|Созревшего/.test(" + _status_expr() + ")", "сбор не завершился")
+        s = _svodka(conn)
+        assert 9 not in s["ernte"], f"собрали клетку, о которой игра спросила бы: {s['ernte']}"
+        assert s["ernte"] == [10, 25, 26], f"собрано не то: {s['ernte']}"
+        assert s["danger"] == [], f"игра показала бы окно: {s['danger']}"
+
+
+def test_harvest_refuses_in_the_water_garden(server):
+    """В водном саду сбор не делаем: там свой объект игры.
+
+    Работать здесь через `gardenjs` значило бы собирать вслепую в невидимом
+    обычном саду — та самая ошибка, что чинилась в 3.4.0. Стенд открываем
+    БЕЗ жнеца игры: иначе своей кнопки сбора не будет и нажимать окажется
+    нечего — проверка была бы пустой.
+    """
+    with stand(server, "?wg=1&zhnec=net") as conn:
+        _wait(conn, "window.watergarden && watergarden.isOpen === true", "водный сад не открылся")
+        _wait(conn, "!!document.querySelector('#si-helper [data-si-button=harvest]')",
+              "своей кнопки сбора нет")
+        _press(conn, "harvest")
+        _wait(conn, "/водном саду/.test(" + _status_expr() + ")", "не отказался в водном саду")
+        assert conn.evaluate("window.__danger") == [], "тронули обычный сад из водного"
+
+
+def test_round_walks_every_garden_and_does_the_work(game):
+    """Обход: по каждому саду собрать → полить, и вернуться домой.
+
+    Семена не выбраны — значит посадки нет, и это сказано словами.
+    Ожидание по стенду: собрано 10 (4+2+1+0+3), полито 16 (12+1+2+1+0).
+    """
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button=round]').length>0",
+          "кнопки обхода нет")
+    game.evaluate("selected = null; true")
+    _press(game, "round")
+    _wait(game, "/Обход/.test(" + _status_expr() + ")", "обход не закончился", timeout=90)
+
+    s = _svodka(game)
+    итог = _status(game)
+    assert s["danger"] == [], f"обход задел опасное: {s['danger']}"
+    # жнец игры нанят — звали его, а не собирали руками
+    assert s["ernte"] == [], f"собирали руками при нанятом жнеце: {s['ernte']}"
+    собрано = sum(z["клеток"] for z in s["zhnec"])
+    assert собрано == 10, f"собрано не то: {s['zhnec']}"
+    assert s["wasser"] == 16, f"полито не то: {s['wasser']}"
+    assert "собрано 10" in итог and "полито 16" in итог, итог
+    assert "Семена не выбраны" in итог, итог
+    # побывали во всех садах и вернулись в первый
+    assert s["switches"][-1] == 1, f"не вернулись в исходный сад: {s['switches']}"
+    for n in (2, 3, 4, 5):
+        assert n in s["switches"], f"сад {n} пропущен: {s['switches']}"
+
+
+def test_round_harvests_by_hand_when_the_reaper_is_not_hired(server):
+    """Жнеца игры нет — обход собирает сам и его не зовёт."""
+    with stand(server, "?zhnec=net") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=round]').length>0",
+              "кнопки обхода нет")
+        conn.evaluate("selected = null; true")
+        _press(conn, "round")
+        _wait(conn, "/Обход/.test(" + _status_expr() + ")", "обход не закончился", timeout=90)
+        s = _svodka(conn)
+        assert "жнец не нанят, а его позвали" not in s["danger"], s["danger"]
+        assert s["zhnec"] == [], f"позвали жнеца, которого нет: {s['zhnec']}"
+        assert len(s["ernte"]) == 10, f"своими руками собрано не то: {s['ernte']}"
+
+
+def test_round_plants_when_seeds_are_chosen(game):
+    """Семена выбраны — обход ещё и сажает освободившееся."""
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button=round]').length>0",
+          "кнопки обхода нет")
+    game.evaluate("regal.selectProduct(1); true")     # морковь, её 40 штук
+    _press(game, "round")
+    _wait(game, "/Обход/.test(" + _status_expr() + ")", "обход не закончился", timeout=120)
+    итог = _status(game)
+    посажено = game.evaluate(
+        "(function(){var n=0;window.__planted.forEach(function(p){n+=p.felder.length});return n})()")
+    assert посажено > 0, f"обход ничего не посадил: {итог}"
+    assert "Семена не выбраны" not in итог, итог
+
+
+def test_round_refuses_in_the_water_garden(water_stand):
+    """Обход идёт по обычным садам: из водного — отказ словами."""
+    conn = water_stand
+    _press(conn, "round")
+    _wait(conn, "/водного сада/.test(" + _status_expr() + ")", "не отказался в водном саду")
+    assert conn.evaluate("window.__gardenSwitches.length") == 0, "переключал сады из водного"

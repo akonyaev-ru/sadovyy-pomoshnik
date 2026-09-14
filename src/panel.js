@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Садовый помощник
 // @namespace    si-helper
-// @version      2026.4
+// @version      2026.5
 // @description  Кнопки-помощники внутри игры. Действует только по нажатию.
 // @match        https://*.molehillempire.com/*
 // @match        https://*.sadowajaimperija.ru/*
@@ -410,6 +410,122 @@
 			return null;
 		}
 
+		/*
+		 * ═══ СБОР УРОЖАЯ ═══════════════════════════════════════════
+		 *
+		 * ПРАВИЛО — из её же `cache()`, ветка `case 1` (разобрано по
+		 * исходнику 2026-09-14):
+		 *   • на клетке что-то растёт (`pid != 0`) — и на КАЖДОЙ клетке
+		 *     растения, иначе она отказывает;
+		 *   • это обычный овощ. Категорию проверяем сами и строго: 'u'
+		 *     открывает ПЛАТНЫЙ диалог сноса, 'h' с сорняком молча полет —
+		 *     обе ветки срабатывают ДО проверки режима, и ровно на них
+		 *     2026-09-09 напоролся живой аккаунт;
+		 *   • растение созрело. Игра судит об этом по картинке клетки:
+		 *     `elements[n].b.alt == 0` значит «ещё не выросло», и она
+		 *     спрашивает окном «действительно собрать?» — недозревший сбор
+		 *     теряет урожай. Спрашиваем то же самое, чтобы окно не
+		 *     выскочило, и вдобавок смотрим `finished`.
+		 *
+		 * `speedup_reduction` сбору НЕ мешает: у неё эта ветка стоит под
+		 * условием `K != 1`, то есть на сбор не распространяется.
+		 * Замер живой игры 2026-09-14: у созревших `alt` равен строке "6".
+		 */
+		function canHarvest(garden, grid, n, now) {
+			var c = grid && grid[n];
+			if (!c || !c.pid) return false;
+			if (c.category !== 'v') return false;
+			if (!c.finished || c.finished > now) return false;
+			try {
+				var el = garden.getElements && garden.getElements()[n];
+				// Сравнение нестрогое — ровно как у игры: `alt` это строка.
+				if (el && el.b && el.b.alt == 0) return false;
+			} catch (e) { /* разметка могла смениться — хватит `finished` */ }
+			return true;
+		}
+
+		// Сколько созревших клеток в текущем саду.
+		function ripeCells() {
+			try {
+				var garden = window.gardenjs, grid = garden.getGrid();
+				var now = nowSec(), n = 0;
+				for (var i = 1; i <= CELLS; i++) if (canHarvest(garden, grid, i, now)) n++;
+				return n;
+			} catch (e) { return 0; }
+		}
+
+		/*
+		 * НАНЯТ ЛИ ЖНЕЦ САМОЙ ИГРЫ.
+		 *
+		 * В её полосе помощников стоит `.harvest` с
+		 * `onclick="gardenjs.harvestAll()"`. Ненанятый помощник помечен
+		 * классом `off` и ведёт не в сбор, а на страницу покупки — так у
+		 * игрока с поливальщиком (`link water off` плюс накладка `.locked`).
+		 * Замер живой игры 2026-09-14: жнец нанят, поливальщик нет.
+		 *
+		 * Пока жнец нанят, СВОЕЙ кнопки сбора не рисуем вовсе: иначе в
+		 * полосе окажется два жнеца — ровно то, за что игрок справедливо
+		 * отчитал нас за двух жуков.
+		 */
+		function gameHarvestHired() {
+			try {
+				var e = document.querySelector('#wimpareaHelper .harvest');
+				if (!e) return false;
+				return !/(^|\s)off(\s|$)/.test(e.className || '');
+			} catch (e) { return false; }
+		}
+
+		function harvestAll() {
+			var problem = checkReady();
+			if (problem) return Promise.reject(new Error(problem));
+
+			var garden = window.gardenjs;
+			var prevMode = (typeof window.mode === 'undefined') ? -1 : window.mode;
+			var done = {}, harvested = 0;
+			var grid = garden.getGrid();
+			var now = nowSec();
+			var ripe = ripeCells();
+
+			setMode(1);
+
+			var i = 1;
+			function step() {
+				for (; i <= CELLS; i++) {
+					if (done[i]) continue;
+
+					var cells = cellsOf(garden, i), k, suitable = true;
+					// Растение целиком: у тыквы 2×2 собираем один раз, а не
+					// четыре, и только если созрела вся площадь.
+					for (k = 0; k < cells.length; k++) {
+						if (!canHarvest(garden, grid, cells[k], now)) { suitable = false; break; }
+					}
+					for (k = 0; k < cells.length; k++) done[cells[k]] = true;
+					done[i] = true;
+					if (!suitable) continue;
+
+					var accepted;
+					try { accepted = garden.action.cache(i) !== false; } catch (e) { accepted = false; }
+					if (accepted) {
+						harvested++;
+						notify.wait('Собираю… ' + harvested);
+						i++;
+						return sleep(PACE_MS).then(step);
+					}
+				}
+				return Promise.resolve();
+			}
+
+			function finish() {
+				try { garden.action.cacheFlush(); } catch (e) { /* очередь уйдёт сама */ }
+				setMode(prevMode);
+			}
+
+			return step().then(function () {
+				finish();
+				return { harvested: harvested, ripe: ripe };
+			}, function (err) { finish(); throw err; });
+		}
+
 		function waterAll() {
 			var problem = checkReady();
 			if (problem) return Promise.reject(new Error(problem));
@@ -792,6 +908,142 @@
 				notify.error(err && err.message ? err.message : 'Не получилось.');
 			}).then(function () { otpustit(); refreshPlantButton(); },
 			       function () { otpustit(); refreshPlantButton(); });
+		}
+
+		function runHarvesting() {
+			if (running) return;
+			// В водном саду СВОЙ объект игры и своя очередь. Работать здесь
+			// через `gardenjs` значило бы собирать вслепую в невидимом
+			// обычном саду — та самая ошибка, что чинилась в 3.4.0.
+			if (inWaterGarden()) {
+				notify.error('Сбор в водном саду я пока не делаю — соберите там сами.');
+				return;
+			}
+			busy(true);
+			notify.wait('Идёт сбор…');
+			harvestAll().then(function (res) {
+				if (res.harvested) {
+					notify.info('Собрано ' + res.harvested + ' ' +
+						plural(res.harvested, 'растение', 'растения', 'растений'));
+				} else if (!res.ripe) {
+					notify.info('Созревшего нет.');
+				} else {
+					notify.error('Собрать не вышло — игра не приняла.');
+				}
+				if (painted) paint(true);
+			}, function (err) {
+				notify.error(err && err.message ? err.message : 'Не получилось.');
+			}).then(otpustit, otpustit);
+		}
+
+		/*
+		 * ═══ ОБХОД ВСЕХ САДОВ ══════════════════════════════════════
+		 *
+		 * Зачем. Замер живой игры 2026-09-14: у игрока пять садов и в
+		 * каждом по 204 созревших растения. По отдельности сбор, посадка и
+		 * полив уже быстрые — медленно то, что весь круг надо повторить
+		 * пять раз, переключаясь вручную. Это около двадцати действий.
+		 *
+		 * Порядок внутри сада — собрать, посадить, полить — не случаен:
+		 * пока не собрано, клетки заняты и сажать некуда; пока не посажено,
+		 * поливать нечего.
+		 *
+		 * Сбор идёт ЕЁ ЖНЕЦОМ, если он нанят: это её собственная кнопка,
+		 * для игрока бесплатная, и один запрос вместо двух сотен. Не нанят
+		 * — собираем сами, клетка за клеткой.
+		 */
+		function gardenReady(n) {
+			try {
+				return currentGarden() === n && !!(window.gardenjs && window.gardenjs.getGrid());
+			} catch (e) { return false; }
+		}
+
+		function goToGarden(n) {
+			if (currentGarden() === n) return Promise.resolve();
+			if (!switchGarden(n)) {
+				return Promise.reject(new Error('Не получилось перейти в сад ' + n + '.'));
+			}
+			// Переключение идёт ответом сервера (`do:changeGarden`), поэтому
+			// ждём, а не считаем сделанным.
+			return waitFor(function () { return gardenReady(n); }, 25000);
+		}
+
+		function harvestHere() {
+			var before = ripeCells();
+			if (!before) return Promise.resolve({ harvested: 0, ripe: 0 });
+			if (!gameHarvestHired()) return harvestAll();
+
+			try { window.gardenjs.harvestAll(); }
+			catch (e) { return harvestAll(); }
+			// Сад вернётся с сервера обновлённым — ждём, пока созревшее уйдёт.
+			return waitFor(function () { return ripeCells() === 0; }, 20000).then(
+				function () { return { harvested: before, ripe: before }; },
+				function () { return { harvested: 0, ripe: before }; }
+			);
+		}
+
+		function runRound() {
+			if (running) return;
+			if (inWaterGarden()) {
+				notify.error('Обход идёт по обычным садам. Выйдите из водного сада.');
+				return;
+			}
+			var list = ownedGardens();
+			if (!list || !list.length) {
+				notify.error('Пока не знаю, какие у вас сады. Нажмите иконку садов в столбике справа.');
+				return;
+			}
+			var pid = currentSeed();
+			var домой = currentGarden();
+			var итог = { собрано: 0, посажено: 0, полито: 0, садов: 0 };
+			busy(true);
+
+			var i = 0;
+			function шаг() {
+				if (i >= list.length) return Promise.resolve();
+				var n = list[i], где = ' (сад ' + (i + 1) + ' из ' + list.length + ')';
+				return goToGarden(n)
+					.then(function () {
+						notify.wait('Собираю' + где);
+						return harvestHere();
+					})
+					.then(function (r) {
+						итог.собрано += (r && r.harvested) || 0;
+						if (!pid) return null;
+						notify.wait('Сажаю' + где);
+						// Семена кончились — это не повод обрывать обход:
+						// в следующем саду поливать всё равно надо.
+						return plantAll(pid).then(null, function () { return null; });
+					})
+					.then(function (r) {
+						итог.посажено += (r && r.planted) || 0;
+						notify.wait('Поливаю' + где);
+						return waterAll();
+					})
+					.then(function (r) {
+						итог.полито += (r && r.watered) || 0;
+						итог.садов++;
+						i++;
+						return шаг();
+					});
+			}
+
+			шаг().then(function () {
+				// Возвращаем игрока туда, откуда он начал.
+				return домой ? goToGarden(домой).then(null, function () { return null; }) : null;
+			}).then(function () {
+				var s = 'Обход ' + итог.садов + ' ' +
+					plural(итог.садов, 'сада', 'садов', 'садов') + ': собрано ' +
+					итог.собрано + ', посажено ' + итог.посажено + ', полито ' + итог.полито + '.';
+				if (!pid) s += ' Семена не выбраны — не сажал.';
+				notify.info(s);
+				if (painted) paint(true);
+			}, function (err) {
+				notify.error((err && err.message ? err.message : 'Обход не закончен.') +
+					' Успел: собрано ' + итог.собрано + ', посажено ' + итог.посажено +
+					', полито ' + итог.полито + '.');
+			}).then(function () { otpustit(); refreshPlantButton(); },
+			        function () { otpustit(); refreshPlantButton(); });
 		}
 
 		// ── строка кнопок: живёт в ряду игры, своей рамки не имеет ────
@@ -1324,6 +1576,15 @@
 		var btnSell = gnomeButton('sell', 'pics/stadt/marktplatz_neu.png', 38, 45,
 			'Продать на рынке', runSelling);
 
+		// Жнец с косой — её же картинка. Рисуется ТОЛЬКО когда жнец игры не
+		// нанят: иначе в полосе стояло бы два жнеца.
+		var btnHarvest = gnomeButton('harvest', 'pics/verkauf/sensenzwerg.gif', 45, 45,
+			'Собрать урожай', runHarvesting);
+
+		// Гном-ускоритель: обойти все сады разом.
+		var btnRound = gnomeButton('round', 'pics/wassergarten/boosterzwerg_klein.png', 25, 45,
+			'Обойти все сады: собрать, посадить, полить', runRound);
+
 		var btnPaint = gnomeButton('paint', 'pics/wassergarten/questzwerg_klein.png', 30, 45,
 			'Подсветить сад: синий — полить, зелёный — созрело, чёрный — пусто', function () {
 			var n = paint(!painted);
@@ -1676,8 +1937,21 @@
 
 		bar.appendChild(btnWater);
 		bar.appendChild(btnPlant);
+		bar.appendChild(btnRound);
 		bar.appendChild(btnPaint);
 		bar.appendChild(btnSell);
+
+		/*
+		 * Своя кнопка сбора появляется и пропадает по ДАННЫМ игры: жнеца
+		 * можно нанять и можно лишиться, и решать это надо каждый круг, а
+		 * не один раз при запуске.
+		 */
+		function syncHarvestButton() {
+			var нужен = !gameHarvestHired();
+			var есть = !!btnHarvest.parentNode;
+			if (нужен && !есть) bar.appendChild(btnHarvest);
+			else if (!нужен && есть) btnHarvest.parentNode.removeChild(btnHarvest);
+		}
 		/*
 		 * Убираем следы прежней панели, если код вставили в страницу заново.
 		 * Наши элементы живут ОТДЕЛЬНО от `#si-helper` (столбик мест, листок
@@ -2318,6 +2592,7 @@
 				soobshchit(prichina);
 				return;
 			}
+			shag('жнец', syncHarvestButton);
 			shag('попрошайки', hookWimps);
 			shag('столбик', function () { buildGardens(false); });
 			shag('расстановка', reposition);

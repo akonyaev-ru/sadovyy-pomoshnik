@@ -74,7 +74,16 @@
 			<div class="link science slot1" style="position:absolute;left:49px;top:0;width:36px;height:45px;background:#5d8f3d"></div>
 			<div class="link water off" style="position:absolute;left:110px;top:0;width:25px;height:45px;background:#5d8f3d;opacity:.5"></div>
 			<div class="locked" style="position:absolute;left:111px;top:5px;width:35px;height:35px;background:#333"></div>
-			<div class="link harvest" style="position:absolute;left:140px;top:0;width:45px;height:45px;background:#5d8f3d"></div>
+			<!--
+				Жнец игры. У живого игрока он НАНЯТ (замер 2026-09-14:
+				`link harvest` без `off`, onclick `gardenjs.harvestAll()`),
+				а поливальщик — нет (`link water off` плюс накладка `.locked`).
+				`?zhnec=net` снимает найм: тогда помощник обязан нарисовать
+				СВОЮ кнопку сбора, а пока жнец нанят — не должен, иначе в
+				полосе окажется два жнеца.
+			-->
+			<div class="link harvest" style="position:absolute;left:140px;top:0;width:45px;height:45px;background:#5d8f3d"
+			     onclick="gardenjs.harvestAll()"></div>
 		</div>
 	</div>
 	<div id="wimpareaCar" class="link car0" style="position:absolute;left:560px;top:0;width:160px;height:55px;background:#6a4a4a"></div>
@@ -176,7 +185,22 @@ function selectMode(d, a, c, b) { mode = d; }
 // ═══════════════════════════════════════════════════════════════════
 
 var _grid = {};
+var _elements = {};  // разметка клеток: у каждой своя фаза роста в `b.alt`
 var EXPECTED = [];   // клетки, которые ДОЛЖНЫ политься (по одной на растение)
+
+// Пересобрать разметку под нынешний сад. Фаза: созрело — "6", растёт — "3",
+// пусто — "0". Отдельно умеем поставить рассинхрон: клетка по данным
+// созрела, а картинка говорит «не выросло» — на такой игра спросит окном.
+function _rebuildElements(рассинхрон) {
+	var now = Zeit.Client - Zeit.Verschiebung;
+	_elements = {};
+	for (var i = 1; i <= 204; i++) {
+		var c = _grid[i], alt = '0';
+		if (c && c.pid) alt = (c.finished && c.finished <= now) ? '6' : '3';
+		if (рассинхрон && рассинхрон.indexOf(i) !== -1) alt = '0';
+		_elements[i] = { b: { alt: alt } };
+	}
+}
 
 (function buildGarden() {
 	var i;
@@ -242,6 +266,54 @@ var EXPECTED = [];   // клетки, которые ДОЛЖНЫ политьс
 
 	// 1 растение из списка исключений игры — нельзя
 	plant(12, 238, { water: DRY, finished: GROW });
+
+	/*
+	 * ОПАСНОЕ, КОТОРОЕ ПО ДАННЫМ СОЗРЕЛО. Без этого стенд был добрее игры:
+	 * постройка и сорняк стояли «растущими», сбор до них не доходил вовсе —
+	 * и проверка «сбор смотрит на вид растения» зеленела на сломанном коде.
+	 * У самой игры ветки сноса и прополки срабатывают ДО проверки режима и
+	 * ДО всякой спелости, то есть достать их можно в любой момент.
+	 */
+	plant(16, 50, { water: DRY, finished: DONE });   // постройка → платный снос
+	plant(17, 60, { water: DRY, finished: DONE });   // трава с сорняком → прополка
+	_grid[17].weed = true;
+})();
+
+/*
+ * ═══ ОСТАЛЬНЫЕ САДЫ ═══════════════════════════════════════════════
+ *
+ * У живого игрока их пять, и в каждом своя работа (замер 2026-09-14: по 204
+ * созревших в каждом). Здесь сады 2–5 нарочно МАЛЕНЬКИЕ по делу: обход
+ * проверяется на том, что он их посещает и делает в каждом ровно своё, а не
+ * на объёме. Остальные клетки заняты растущим и недавно политым — с ними
+ * делать нечего.
+ *
+ * Ожидаемое за обход по садам 1–5, когда семена НЕ выбраны:
+ *   собрано 4+2+1+0+3 = 10, полито 12+1+2+1+0 = 16.
+ */
+var _gardens = { 1: _grid };
+var СОЗРЕЛО = { 2: [1, 2], 3: [1], 4: [], 5: [1, 2, 3] };
+var СУХО    = { 2: [50],   3: [50, 51], 4: [50], 5: [] };
+
+(function buildOtherGardens() {
+	var DRY = NOW - 90000, WET = NOW - 3600, GROW = NOW + 7200, DONE = NOW - 60;
+	for (var g = 2; g <= 5; g++) {
+		var grid = {};
+		for (var i = 1; i <= 204; i++) {
+			// по умолчанию — растёт и недавно полито: трогать нечего
+			grid[i] = { pid: 1, category: 'v', water: WET, finished: GROW,
+			            x: 1, y: 1, sx: 1, sy: 1 };
+		}
+		СОЗРЕЛО[g].forEach(function (n) {
+			grid[n] = { pid: 1, category: 'v', water: WET, finished: DONE,
+			            x: 1, y: 1, sx: 1, sy: 1 };
+		});
+		СУХО[g].forEach(function (n) {
+			grid[n] = { pid: 1, category: 'v', water: DRY, finished: GROW,
+			            x: 1, y: 1, sx: 1, sy: 1 };
+		});
+		_gardens[g] = grid;
+	}
 })();
 
 // ═══════════════════════════════════════════════════════════════════
@@ -295,7 +367,20 @@ if (/[?&]sady_igry=1/.test(location.search)) {
 	document.body.appendChild(qn);
 }
 var __currentGarden = 1;
-function waehleGarten(n) { window.__gardenSwitches.push(n); __currentGarden = n; }
+/*
+ * ПЕРЕКЛЮЧЕНИЕ САДА ИДЁТ ОТВЕТОМ СЕРВЕРА, А НЕ МГНОВЕННО.
+ *
+ * В игре это `ajax.request("ajax",{do:"changeGarden"},…)` с перестройкой
+ * сетки в обработчике. Мгновенное переключение было бы добрее игры: обход
+ * успевал бы отработать по ещё не сменившемуся саду и всё равно зеленел.
+ */
+function waehleGarten(n) {
+	window.__gardenSwitches.push(n);
+	setTimeout(function () {
+		if (_gardens[n]) { _grid = _gardens[n]; _rebuildElements(); }
+		__currentGarden = n;
+	}, 350);
+}
 
 // Город: у Ивана на него было две кнопки. В игре это `zeigeStadtMain(1)` —
 // рынок и `(2)` — карта города. Сама функция объявлена ниже, вместе с
@@ -329,7 +414,17 @@ var gardenjs = (function () {
 	var timer = 0;
 
 	my.getGrid = function () { return _grid; };
-	my.getElements = function () { return {}; };
+	/*
+	 * РАЗМЕТКА КЛЕТОК — с фазой роста, как в игре.
+	 *
+	 * Раньше здесь стояло `return {}`, и проверка «созрело ли» по картинке
+	 * не работала вовсе: стенд был добрее игры. У настоящей игры
+	 * `_elements[n] = {f:…, w:…, b:$("gardenTile"+n+"_cursor")}`, и по
+	 * `b.alt` она судит о фазе: замер живой игры 2026-09-14 дал у созревших
+	 * строку "6". Когда `alt == 0`, её `cache()` в режиме сбора показывает
+	 * окно «действительно собрать?» — недозревший сбор теряет урожай.
+	 */
+	my.getElements = function () { return _elements; };
 	my.getCurrentGarden = function () { return __currentGarden; };
 	my.getRestrictTo = function () { return null; };
 	my.getPossibleCategories = function () { return { all: { v:1, z:1, vz:1 } }; };
@@ -387,6 +482,9 @@ var gardenjs = (function () {
 		if (D.indexOf(false) !== -1 || alreadyQueued(D)) return false;
 		if (K === -1) return false;
 
+		// Вода и украшения игра отвергает сама, как и в жизни.
+		if (J === 'w' || J === 'wd') return false;
+
 		for (var i = 0; i < D.length; i++) {
 			var C = _grid[D[i]];
 			if (K === 2) {
@@ -394,6 +492,15 @@ var gardenjs = (function () {
 			}
 			if (K === 0) {
 				if (C.pid !== 0 || regal.getCount(selected) < 1) return false;
+			}
+			if (K === 1) {
+				// Как в игре, ветка `case 1`: пустая клетка — отказ, а
+				// недозревшее (картинка `alt == 0`) — ОКНО «действительно
+				// собрать?». Окно теряет урожай, значит для нас это опасно.
+				if (C.pid === 0) return false;
+				if (_elements[R] && _elements[R].b.alt == 0) {
+					window.__danger.push('окно сбора ' + R); return false;
+				}
 			}
 		}
 
@@ -403,11 +510,60 @@ var gardenjs = (function () {
 		else { clearTimeout(timer); timer = setTimeout(my.action.cacheFlush, c); }
 	};
 
+	/*
+	 * ЖНЕЦ ИГРЫ — `gardenjs.harvestAll()`.
+	 *
+	 * Разобрано по исходнику: один запрос `do:gardenHarvestAll`, урожай
+	 * приходит ответом. Кнопка на него есть у игрока ТОЛЬКО когда помощник
+	 * нанят; ненанятый помечен `off` и ведёт на страницу покупки. Звать
+	 * серверное действие, не имея помощника, — как раз то, за что мы
+	 * однажды уже открыли игроку платный диалог, поэтому здесь это
+	 * считается опасным.
+	 *
+	 * Ответ приходит С ЗАДЕРЖКОЙ: обход обязан дождаться, а не считать
+	 * сделанным.
+	 */
+	my.harvestAll = function (callback) {
+		var жнец = document.querySelector('#wimpareaHelper .harvest');
+		if (!жнец || /(^|\s)off(\s|$)/.test(жнец.className || '')) {
+			window.__danger.push('жнец не нанят, а его позвали');
+			return;
+		}
+		var сад = __currentGarden;
+		setTimeout(function () {
+			var now = Zeit.Client - Zeit.Verschiebung, убрано = [];
+			for (var i = 1; i <= 204; i++) {
+				var c = _grid[i];
+				if (c && c.pid && c.category === 'v' && c.finished && c.finished <= now) {
+					убрано.push(i);
+					_grid[i] = { pid:0, category:'', water:0, finished:0, x:1, y:1, sx:1, sy:1 };
+				}
+			}
+			_rebuildElements();
+			window.__sent.push({ file: 'harvestAll', сад: сад, felder: убрано });
+			if (callback) callback();
+		}, 400);
+	};
+
 	my.action.cacheFlush = function () {
 		clearTimeout(timer);
 		if (!d.length) return;
 		var water = d.filter(function (e) { return e.mode === 2; }).map(function (e) { return e.feld; });
 		if (water.length) window.__sent.push({ file: 'wasser', felder: water });
+
+		var ernte = d.filter(function (e) { return e.mode === 1; });
+		if (ernte.length) {
+			window.__sent.push({ file: 'ernte', felder: ernte.map(function (e) { return e.feld; }) });
+			// Игра действительно убирает урожай: клетки пустеют. Без этого
+			// повторный сбор находил бы то же самое снова.
+			ernte.forEach(function (e) {
+				e.felder.forEach(function (n) {
+					if (!n) return;
+					_grid[n] = { pid:0, category:'', water:0, finished:0, x:1, y:1, sx:1, sy:1 };
+				});
+			});
+			_rebuildElements();
+		}
 
 		var plant = d.filter(function (e) { return e.mode === 0; });
 		if (plant.length) {
@@ -426,6 +582,7 @@ var gardenjs = (function () {
 						finished: Zeit.Client + 3600, x: 1, y: 1, sx: pr.sx, sy: pr.sy };
 				});
 			});
+			_rebuildElements();
 		}
 		d = [];
 	};
@@ -452,6 +609,13 @@ var gardenjs = (function () {
 	}
 })();
 
+/*
+ * ?nedozrelo=1 — РАССИНХРОН, которого стенд раньше не умел: клетка 9 по
+ * данным созрела, а картинка у неё говорит «не выросло» (`alt == 0`). На
+ * такой игра показывает окно «действительно собрать?», и сбор потерял бы
+ * урожай. Помощник обязан такую клетку обойти.
+ */
+_rebuildElements(/[?&]nedozrelo=1/.test(location.search) ? [9] : null);
 console.log('стенд готов: ожидается политых растений —', EXPECTED.length, EXPECTED);
 </script>
 
@@ -821,6 +985,10 @@ var wimparea = (function () {
 <div id="multiframe" style="position:absolute; top:57px; left:80px; width:600px; height:400px; z-index:22"></div>
 <div id="citymap" style="display:none"></div>
 <script>
+	if (/[?&]zhnec=net/.test(location.search)) {
+		var _zh = document.querySelector('#wimpareaHelper .harvest');
+		if (_zh) _zh.className = 'link harvest off';
+	}
 	if (/[?&]multiframe=polny/.test(location.search)) {
 		document.getElementById('multiframe').innerHTML =
 			'<iframe src="stand-stadt.html" style="width:100%;height:100%;border:0"></iframe>';

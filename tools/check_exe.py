@@ -165,6 +165,16 @@ def _check(proc: subprocess.Popen) -> int:
             "кнопки города на месте": conn.evaluate(
                 "document.querySelectorAll('#si-helper-gardens [data-si-city]').length"
             ) == 2,
+            # Обход всех садов — выпуск 2026.5. Кнопка должна быть, а своего
+            # жнеца при нанятом жнеце игры быть НЕ должно: два жнеца в полосе
+            # — та же ошибка, что была с двумя жуками.
+            "гном обхода на месте": conn.evaluate(
+                "(document.querySelector('#si-helper [data-si-button=round]')"
+                ".getAttribute('src')||'').indexOf('boosterzwerg_klein.png')>=0"
+            ),
+            "своего жнеца нет при нанятом": conn.evaluate(
+                "!document.querySelector('#si-helper [data-si-button=harvest]')"
+            ),
             # Выгодность в листке попрошайки — выпуск 3.5.0. Открываем листок
             # так же, как открыл бы игрок, и смотрим, посчитан ли процент.
             # Стенд: 10 моркови по 3 и 5 огурцов по 2 — это 40, дают 48.

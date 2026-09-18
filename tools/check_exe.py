@@ -192,6 +192,13 @@ def _check(proc: subprocess.Popen) -> int:
                 "(document.querySelector('#si-helper [data-si-button=sell]')"
                 ".getAttribute('src')||'').indexOf('marktplatz_neu.png')>=0"
             ),
+            # Птичья почта — выпуск 2026.7: гном её же иконкой и иконка в
+            # столбике. На стенде почта у игрока есть.
+            "почта на месте": conn.evaluate(
+                "(function(){var g=document.querySelector('#si-helper [data-si-button=post]');"
+                "var n=document.querySelector('#si-helper-gardens [data-si-nav=birds]');"
+                "return !!g && !!n && (g.getAttribute('src')||'').indexOf('Vogelposticon01')>=0})()"
+            ),
         }
 
         conn.evaluate("document.querySelector('#si-helper [data-si-button=water]').click(); true")

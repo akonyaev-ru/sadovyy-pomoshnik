@@ -887,3 +887,65 @@ def test_game_found_in_a_tab_marks_it_open_for_everyone(monkeypatch):
     opened = {}
     app._open_game_once(_GameConn(), opened, "igra", True)
     assert opened.get("_igra") is True
+
+
+def test_quit_upjers_answers_the_apps_close_question(monkeypatch, tmp_path):
+    """Приложение спрашивает «Действительно закрыть» — отвечаем «Закрыть» один
+    раз, и ждём выхода дальше. Так стало после обновления приложения 2026-09-18."""
+    exe = tmp_path / "upjers Home.exe"
+    exe.write_bytes(b"x")
+    monkeypatch.setattr(browser.subprocess, "Popen", lambda *a, **k: object())
+    nazhali = []
+    zhivo = {"n": 0}
+
+    def running():
+        zhivo["n"] += 1
+        # живёт, пока не ответили на вопрос, и ещё два круга после
+        return [4242] if not nazhali or zhivo["n"] < len(nazhali) + 4 else []
+
+    monkeypatch.setattr(browser, "upjers_running", running)
+    monkeypatch.setattr(browser, "confirm_quit_dialog", lambda pids: nazhali.append(list(pids)) or True)
+    monkeypatch.setattr(browser.time, "sleep", lambda s: None)
+    assert browser.quit_upjers(exe, timeout=5.0) is True
+    assert nazhali == [[4242]], f"на вопрос надо ответить ровно один раз: {nazhali}"
+
+
+def _dialog_child(*podpisi: str):
+    import subprocess
+    import sys as _sys
+    return subprocess.Popen(
+        [_sys.executable, str(Path(__file__).resolve().parent / "dialog_child.py"), *podpisi],
+        stdout=subprocess.PIPE, text=True, encoding="utf-8",
+    )
+
+
+def _press_dialog(proc, tries: int = 30) -> bool:
+    for _ in range(tries):
+        time.sleep(0.3)
+        if browser.confirm_quit_dialog([proc.pid]):
+            return True
+    return False
+
+
+@s_oknami
+def test_confirm_quit_dialog_presses_close_in_a_real_dialog():
+    """Настоящее окно с «Отменить»/«Закрыть» — нажимаем именно «Закрыть»."""
+    proc = _dialog_child()
+    try:
+        assert _press_dialog(proc), "кнопку «Закрыть» в настоящем диалоге не нашли"
+        out, _ = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert out.split() == ["0", "102"], f"нажата не та кнопка: {out!r}"
+
+
+@s_oknami
+def test_confirm_quit_dialog_leaves_an_unknown_dialog_alone():
+    """Окно с незнакомыми подписями — не трогаем: чужой вопрос не наш ответ."""
+    proc = _dialog_child("Отменить", "Удалить всё")
+    try:
+        assert not _press_dialog(proc, tries=8), "нажал кнопку, подписи которой не знает"
+        assert proc.poll() is None, "диалог закрылся сам — проверка ничего не доказала"
+    finally:
+        proc.kill()

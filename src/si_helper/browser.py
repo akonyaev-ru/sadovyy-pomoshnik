@@ -515,6 +515,15 @@ def quit_upjers(app: Path, timeout: float = 15.0) -> bool:
     проверено на живом приложении 2026-09-11 — после `upjers://quit` и
     запуска с портом портал открылся на «Моих играх» без окна пароля.
     Закрылось за 1,2 с.
+
+    С ОБНОВЛЕНИЕМ ПРИЛОЖЕНИЯ 2026-09-18 ПОЯВИЛСЯ ВОПРОС. На `quit` оно
+    теперь показывает своё окно «Действительно закрыть» с кнопками
+    «Отменить» и «Закрыть» и ждёт ответа; порт при этом молчит, а помощник
+    прежде честно ждал 15 с и сдавался. Отвечаем за человека — нажимаем
+    «Закрыть» в его же окне (`BM_CLICK` кнопке диалога, без фокуса и
+    мыши). Это не чёрный ход, а ровно то нажатие, которое сделал бы игрок.
+    Подпись кнопки зависит от языка приложения — держим список; не нашли
+    подписи — не нажимаем ничего и сообщаем, как раньше.
     """
     try:
         subprocess.Popen(
@@ -525,11 +534,81 @@ def quit_upjers(app: Path, timeout: float = 15.0) -> bool:
     except Exception:
         return False
     deadline = time.monotonic() + timeout
+    otvetili = False
     while time.monotonic() < deadline:
-        if not upjers_running():
+        pids = upjers_running()
+        if not pids:
             return True
+        if not otvetili:
+            otvetili = confirm_quit_dialog(pids)
         time.sleep(0.5)
     return not upjers_running()
+
+
+# Подписи кнопки «закрыть» в окне подтверждения — по языкам игры.
+ZAKRYT_SLOVA = ("закрыть", "выйти", "выход", "close", "quit", "exit",
+                "schließen", "beenden", "zamknij", "bezárás", "zavřít",
+                "ukončit", "kapat", "çık", "cerrar", "salir", "sluiten",
+                "afsluiten", "închide", "ieșire")
+
+
+def confirm_quit_dialog(pids: list[int]) -> bool:
+    """Нажимает «Закрыть» в окне подтверждения выхода приложения, если оно есть.
+
+    Окно — обычный диалог Windows (класс `#32770`) процесса приложения; у
+    его кнопок нет своих номеров (`GetDlgCtrlID` = 0 у обеих, замерено
+    2026-09-18), поэтому узнаём нужную по подписи. Вернёт True, если нажал.
+    """
+    if not pids or os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return False
+    nashi = set(pids)
+    try:
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def _class(hwnd) -> str:
+            buf = ctypes.create_unicode_buffer(64)
+            u32.GetClassNameW(hwnd, buf, 64)
+            return buf.value
+
+        def _text(hwnd) -> str:
+            n = u32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(n + 1)
+            u32.GetWindowTextW(hwnd, buf, n + 1)
+            return buf.value
+
+        dialogs: list[int] = []
+
+        def _top(hwnd, _lparam):
+            pid = wintypes.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in nashi and _class(hwnd) == "#32770":
+                dialogs.append(hwnd)
+            return True
+
+        u32.EnumWindows(callback(_top), 0)
+        for dlg in dialogs:
+            knopki: list[tuple[int, str]] = []
+
+            def _child(hwnd, _lparam):
+                if _class(hwnd) == "Button":
+                    knopki.append((hwnd, _text(hwnd)))
+                return True
+
+            u32.EnumChildWindows(dlg, callback(_child), 0)
+            for hwnd, podpis in knopki:
+                slovo = podpis.replace("&", "").strip().lower()
+                if slovo in ZAKRYT_SLOVA:
+                    u32.SendMessageW(hwnd, 0x00F5, 0, 0)   # BM_CLICK
+                    return True
+    except Exception:
+        return False
+    return False
 
 
 def close_upjers(timeout: float = 12.0) -> int:

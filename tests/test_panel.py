@@ -282,7 +282,8 @@ def test_no_permanent_box(game):
         "return {fon:s.backgroundColor, ramka:s.borderTopWidth,"
         " kn:b.querySelectorAll('[data-si-button]').length}})()"
     )
-    assert box["kn"] == 5, f"кнопок должно быть 5: {box}"
+    # лейка, жук, обход, фонарь, рынок и почта (с 2026.7)
+    assert box["kn"] == 6, f"кнопок должно быть 6: {box}"
     assert box["fon"] in ("rgba(0, 0, 0, 0)", "transparent"), f"у строки есть фон: {box}"
     assert box["ramka"] in ("0px", ""), f"у строки есть рамка: {box}"
 
@@ -455,13 +456,13 @@ def test_buttons_are_the_games_own_gnomes(server):
     """
     # Без автомата игры помощник рисует своего жука — тут и проверяем набор.
     with stand(server, "?bez_avtomata=1") as conn:
-        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button]').length===5",
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button]').length===6",
               "кнопки не появились")
         srcs = conn.evaluate(
             "(function(){var a=document.querySelectorAll('#si-helper [data-si-button]'),o=[];"
             "for(var i=0;i<a.length;i++)o.push(a[i].getAttribute('src')||'');return o})()"
         )
-    assert len(srcs) == 5, f"кнопок-картинок должно быть 5: {srcs}"
+    assert len(srcs) == 6, f"кнопок-картинок должно быть 6: {srcs}"
 
     joined = " ".join(srcs)
     assert "kannenzwerg.gif" in joined, "нет гнома с лейкой — того самого, что был у Ивана"
@@ -472,6 +473,7 @@ def test_buttons_are_the_games_own_gnomes(server):
     assert "questzwerg_klein.png" in joined, "нет гнома с фонарём"
     assert "marktplatz_neu.png" in joined, "нет рыночной площади — быстрой продажи"
     assert "boosterzwerg_klein.png" in joined, "нет гнома-ускорителя — обхода всех садов"
+    assert "Vogelposticon01.gif" in joined, "нет птичьей почты — её же иконки из быстрой навигации"
     # Жнец игры в стенде НАНЯТ, значит своего жнеца рисовать нельзя:
     # два жнеца в полосе — та же ошибка, что была с двумя жуками.
     assert "sensenzwerg.gif" not in joined, "свой жнец при нанятом жнеце игры — это второй жнец"
@@ -720,8 +722,8 @@ def test_garden_column_is_a_column(server):
         })()""")
         assert r["vStrochku"] == 0, f"иконки встали в строку: {r}"
         assert r["raznyhLevyh"] == 1, f"столбик неровный: {r}"
-        # пять садов, грибы, улитки и две кнопки города
-        assert r["shtuk"] == 9, f"в столбике не то число иконок: {r}"
+        # пять садов, почта, грибы, улитки и две кнопки города
+        assert r["shtuk"] == 10, f"в столбике не то число иконок: {r}"
 
 
 def test_city_buttons_go_to_the_city(server):
@@ -1326,7 +1328,7 @@ def test_panel_reports_its_own_state(game):
           "гномы не появились")
     _wait(game, "/^в саду/.test((window.SI_HELPER||{}).sostoyanie||'')", "состояние не выложено")
     state = game.evaluate("window.SI_HELPER.sostoyanie")
-    assert "гномов 5" in state, f"число гномов не сходится: {state}"
+    assert "гномов 6" in state, f"число гномов не сходится: {state}"
     assert "столбике" in state and "сад 1" in state, f"в состоянии нет садов: {state}"
 
     game.evaluate("zeigeStadtMain(1); true")
@@ -1660,3 +1662,168 @@ def test_round_refuses_in_the_water_garden(water_stand):
     _wait(conn, "/водный он обойдёт сам/.test(" + _status_expr() + ")",
           "не подсказал начать обход из обычного сада")
     assert conn.evaluate("window.__gardenSwitches.length") == 0, "переключал сады из водного"
+
+
+# ── птичья почта ─────────────────────────────────────────────────────
+
+
+def _pochta(conn):
+    """Что почта отправила бы на сервер, и что стало с хозяйством."""
+    return conn.evaluate("""(function(){
+        var q = [];
+        window.__pochtaZaprosy.forEach(function(z){
+            var s = z['do'];
+            if (z.slot !== undefined) s += ' slot=' + z.slot;
+            if (z.jobslot !== undefined) s += ' jobslot=' + z.jobslot;
+            if (z.house !== undefined) s += ' house=' + z.house;
+            if (z.bird !== undefined) s += ' bird=' + z.bird;
+            q.push(s);
+        });
+        return {zaprosy: q, danger: window.__danger, gde: window.__gdeMy,
+                dengi: parseFloat(player_bar), polka: {1: regal.getCount(1), 2: regal.getCount(2),
+                11: regal.getCount(11), 48: regal.getCount(48)},
+                otkryta: getComputedStyle(document.getElementById('birds')).display !== 'none',
+                dialogs: window.__dialogs.length};
+    })()""")
+
+
+def _zhdat_pochtu(conn, timeout: float = 60.0) -> str:
+    # Шарики по ходу тоже начинаются с «Почта:» — ждём именно итог.
+    _wait(conn, "/Почта: забрано/.test(" + _status_expr() + ")", "почта не закончилась", timeout=timeout)
+    return _status(conn)
+
+
+def test_post_gnome_and_icon_appear_only_when_the_player_has_the_post(game, server):
+    """Кнопка почты и её иконка в столбике — только если почта у игрока есть."""
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button=post]').length>0",
+          "гнома почты нет")
+    icons = _nav_icons(game)
+    assert any(i.startswith("birds|") and "Vogelposticon01.gif" in i for i in icons), icons
+
+    with stand(server, "?pochty=net") as conn:
+        time.sleep(1.5)
+        assert conn.evaluate("document.querySelectorAll('#si-helper [data-si-button=post]').length") == 0, \
+            "гном почты нарисован игроку без почты"
+        assert not any(i.startswith("birds|") for i in _nav_icons(conn)), "иконка почты без почты"
+
+
+def test_post_collects_feeds_sends_and_buys(game):
+    """Одно нажатие: забрать готовые, купить птицу в опустевший скворечник,
+    покормить и разослать — всё функциями игры и ровно в этом порядке.
+
+    Стенд: готовы заказы 2 и 5; птица дома 3 после сдачи уходит на пенсию;
+    новый заказ слота 5 (выносливость 8) берёт свежекупленная Ласточка,
+    заказ слота 2 (7) — Ласточка дома 1 после корма (было 6); заказ 3 (груз 6)
+    тянет только Попугай, а он летит. Летящих не кормят и не шлют — Голубь
+    дома 4 слабее Ласточек и достался бы лёгкому заказу первым.
+    """
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button=post]').length>0",
+          "гнома почты нет")
+    _press(game, "post")
+    итог = _zhdat_pochtu(game)
+    p = _pochta(game)
+
+    assert p["danger"] == [], f"почта задела опасное: {p['danger']}"
+    assert p["zaprosy"] == [
+        "birds_init",
+        "birds_finish_job slot=2",
+        "birds_finish_job slot=5",
+        "birds_buy_bird slot=3 bird=5",
+        "birds_start_job jobslot=5 house=3",
+        "birds_feed_bird slot=1",
+        "birds_start_job jobslot=2 house=1",
+    ], p["zaprosy"]
+    assert "забрано 2" in итог and "отправлено 2" in итог and "покормлено 1" in итог, итог
+    assert "Куплено: Ласточки за 4.000,00 сТ" in итог, итог
+    assert "заказ 3 — нет свободной птицы: нужна сила 6 и выносливость 8" in итог, итог
+    assert "Перьев +123" in итог, итог          # 111 + 12 с двух наград
+    # деньги: две награды минус птица; полка: продукты заказов и корм ушли
+    assert p["dengi"] == 20000 + 5719 + 1035 - 4000, p["dengi"]
+    assert p["polka"] == {"1": 35, "2": 8, "11": 27, "48": 8}, p["polka"]
+    # экран закрыт, игрок вернулся в свой сад, окон наград не осталось
+    assert not p["otkryta"], "почта осталась открытой"
+    assert p["gde"][-1] == "garden1", p["gde"]
+    assert p["dialogs"] == 0, "игра показала окно, а помощник не подменил награду"
+
+
+def test_post_never_pays_coins_for_a_retired_parrot(server):
+    """Ушёл Попугай — его продают за Coins, и помощник его НЕ покупает,
+    а говорит об этом. Свободных птиц на второй заказ тогда нет."""
+    with stand(server, "?pochta_popugay_ushel=1") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=post]').length>0",
+              "гнома почты нет")
+        _press(conn, "post")
+        итог = _zhdat_pochtu(conn)
+        p = _pochta(conn)
+        assert p["danger"] == [], p["danger"]
+        assert not any(z.startswith("birds_buy_bird") for z in p["zaprosy"]), p["zaprosy"]
+        assert "скворечник 3 пуст: Попугай продаётся не за сТ" in итог, итог
+        assert "отправлено 1" in итог and "покормлено 1" in итог, итог
+        assert "заказ 3 — не хватает Морковь ×460" in итог, итог
+        assert "заказ 2 — нет свободной птицы" in итог, итог
+        assert p["dengi"] == 20000 + 5719 + 1035, p["dengi"]
+
+
+def test_post_stops_with_the_games_own_words_when_the_server_refuses(server):
+    """Сервер отказал — цикл останавливается, отказ пересказан словами игры,
+    сделанное названо, экран закрыт. Не крутится до бесконечности."""
+    with stand(server, "?pochta_otkaz=1") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=post]').length>0",
+              "гнома почты нет")
+        _press(conn, "post")
+        итог = _zhdat_pochtu(conn, timeout=40)
+        p = _pochta(conn)
+        assert "Игра ответила" in итог and "Сервер отказал нарочно" in итог, итог
+        assert "Успел: Почта: забрано 2" in итог, итог
+        assert sum(1 for z in p["zaprosy"] if z.startswith("birds_start_job")) == 1, p["zaprosy"]
+        assert not p["otkryta"], "после отказа почта осталась открытой"
+        assert conn.evaluate("!document.querySelector('#si-helper [data-si-button=post]').disabled"), \
+            "после отказа гномы остались притушенными"
+
+
+def test_helpers_hide_behind_the_post_screen(server):
+    """Экран почты ложится поверх сада и полосы — гномов там быть не должно
+    (снимок живой игры 2026-09-18: они стояли на её слоте заказов 10)."""
+    with stand(server, "?pochta_otkryta=1") as conn:
+        _wait(conn, "getComputedStyle(document.getElementById('birds')).display !== 'none'",
+              "почта не открылась")
+        _wait(conn, "(function(){var b=document.getElementById('si-helper');"
+                    "return b && getComputedStyle(b).display === 'none'})()",
+              "за открытой почтой гномы остались на экране")
+        state = conn.evaluate("window.SI_HELPER && window.SI_HELPER.sostoyanie")
+        assert "почта" in state, f"самоотчёт не назвал причину: {state}"
+        conn.evaluate("birds.close(); true")
+        _wait(conn, "getComputedStyle(document.getElementById('si-helper')).display !== 'none'",
+              "после закрытия почты гномы не вернулись")
+
+
+def test_round_ends_at_the_post(game):
+    """Обход: сады → водный сад → почта, и домой. Почта — последняя."""
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button=round]').length>0",
+          "кнопки обхода нет")
+    game.evaluate("selected = null; true")
+    _press(game, "round")
+    _wait(game, "/Обход/.test(" + _status_expr() + ")", "обход не закончился", timeout=120)
+    итог = _status(game)
+    assert "Почта: забрано 2, отправлено 2, покормлено 1" in итог, итог
+    порядок = game.evaluate("window.__sent.map(function(s){return s.file})")
+    assert "birds" in порядок and "watergardenCache" in порядок, порядок
+    assert порядок.index("watergardenCache") < порядок.index("birds"), f"почта раньше водного сада: {порядок}"
+    p = _pochta(game)
+    assert p["danger"] == [], p["danger"]
+    assert not p["otkryta"], "после обхода почта осталась открытой"
+    s = _svodka(game)
+    assert s["switches"][-1] == 1, f"не вернулись в исходный сад: {s['switches']}"
+
+
+def test_round_skips_the_post_when_the_player_has_none(server):
+    """Нет почты — обход её молча пропускает, без слов и без запросов."""
+    with stand(server, "?pochty=net") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=round]').length>0",
+              "кнопки обхода нет")
+        conn.evaluate("selected = null; true")
+        _press(conn, "round")
+        _wait(conn, "/Обход/.test(" + _status_expr() + ")", "обход не закончился", timeout=120)
+        итог = _status(conn)
+        assert "Почта" not in итог, итог
+        assert conn.evaluate("window.__pochtaZaprosy.length") == 0, "обход ходил на почту, которой нет"

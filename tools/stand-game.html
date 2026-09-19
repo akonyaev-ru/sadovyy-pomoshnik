@@ -1212,6 +1212,127 @@ if (/[?&]pochta_otkryta=1/.test(location.search) && POCHTA_EST) {
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════════
+     ПАСЕКА. По объекту `bees` из wurzel_all.js и снимку живых данных
+     2026-09-19 (20 ульев на «Тщательно», мёд в сотах, цветы в садах).
+     Экран `#bees` ложится поверх сада, как и почта.
+       ?paseki=net            — у игрока пасеки нет
+       ?paseka_otkryta=1      — страница открывается с открытой пасекой
+       ?paseka_otkaz=1        — сервер отказывает отправке словами
+       ?paseka_banki_polny=1  — разлить некуда: улей с полными сотами должен остаться дома
+     Ульи стенда нарочно разные — по одному на каждое правило помощника:
+       1 вернулся, летал «Тщательно»           → отправить тем же маршрутом
+       2 в полёте                              → не трогать, посчитать
+       3 вернулся, но цветы для его мёда не посажены → сказать
+       4 вернулся, истории полётов нет         → маршрутом большинства
+       5 вернулся, соты его мёда полны         → сперва разлить, потом отправить
+       6 не куплен                             → мимо
+       7 вернулся, прошлый маршрут платный     → сказать, не отправлять
+     ═══════════════════════════════════════════════════════════════ -->
+<div id="bees" style="display:none;position:absolute;left:0;top:0;width:720px;height:640px;
+	background:#6b5a2a;color:#fff;z-index:20">
+	<div style="padding:8px">Пасека (подделка)</div>
+	<div id="bees_hives"></div>
+</div>
+
+<script>
+var PASEKA_EST = !/[?&]paseki=net/.test(location.search);
+if (PASEKA_EST && quicknavi.data.garden1) quicknavi.data.bees = 1;
+var PASEKA_OTKAZ = /[?&]paseka_otkaz=1/.test(location.search);
+var PASEKA_BANKI_POLNY = /[?&]paseka_banki_polny=1/.test(location.search);   // разлить некуда
+
+data_products[52] = { name: 'Васильки', category: 'v', sx: 1, sy: 1, plantable: true, crop: 4, price: 1.9 };
+data_products[3] = { name: 'Салат', category: 'v', sx: 1, sy: 1, plantable: true, crop: 4, price: 0.08 };
+data_products[8] = { name: 'Ежевика', category: 'v', sx: 1, sy: 1, plantable: true, crop: 4, price: 2.0 };
+data_products[310] = { name: 'Мёд салатный', category: 'h' };
+data_products[305] = { name: 'Мёд ежевичный', category: 'h' };
+data_products[312] = { name: 'Мёд полевой', category: 'h' };
+data_products[316] = { name: 'Мёд васильковый', category: 'h' };
+
+var BEES_CFG = {
+	hives: { 1: { money: 10 }, 2: { money: 2000 }, 3: { money: 5000 }, 4: { money: 10000 }, 5: { money: 15000 }, 6: { money: 20000 }, 7: { money: 25000 } },
+	hive_level: { 1: { harvest_multi: 1 }, 4: { harvest_multi: 1.3 } },
+	tours: { 1: { duration: 7200, multi: 2, name: 'Быстро' }, 2: { duration: 28800, multi: 1.5, name: 'Тщательно' },
+	         3: { duration: 86400, multi: 1, name: 'До последнего цвета' }, 4: { duration: 3600, multi: 3, name: 'Молнией', money: 100 } },
+	mapping: { 310: { pid: 3, honey: 13 }, 305: { pid: 8, honey: 11 }, 312: { pid: 13, honey: 28 }, 316: { pid: 52, honey: 5 } },
+	max_capacity: 100000, new_capacity: 120000, speedup_allowed: 0
+};
+
+var BEES_STATE = {
+	level: 4,
+	hives: {
+		1: { level: 4, pid: '316', tour_start: NOW - 30000, tour_duration: 28800, tour_remain: -1200 },
+		2: { level: 4, pid: '316', tour_start: NOW - 23800, tour_duration: 28800, tour_remain: 5000 },
+		3: { level: 4, pid: '310', tour_start: NOW - 30000, tour_duration: 28800, tour_remain: -900 },
+		4: { level: 4, pid: '316' },
+		5: { level: 4, pid: '312', tour_start: NOW - 30000, tour_duration: 28800, tour_remain: -600 },
+		6: { level: 1, buyable: 1 },
+		7: { level: 4, pid: '305', tour_start: NOW - 9000, tour_duration: 3600, tour_remain: -5400 }
+	}
+};
+var BEES_STOCK = { 310: 500, 305: 2000, 312: 120000, 316: 20000 };   // 312 — соты полны
+var BEES_GARDEN = { 52: 1020, 8: 300, 13: 40 };                        // салат (3) не посажен
+
+function _beesClone(x) { return JSON.parse(JSON.stringify(x)); }
+window.__pasekaZaprosy = [];
+
+var bees = (function () {
+	var my = { data: {} };
+	function otvet() {
+		my.data = { data: _beesClone(BEES_STATE), config: _beesClone(BEES_CFG), stock: _beesClone(BEES_STOCK), garden: _beesClone(BEES_GARDEN), wimps: [] };
+	}
+	function otkaz(text) { basedialog.show({ type: 'info', headline: 'Ошибка', text: text }); }
+	function zapros(q, fn) {
+		window.__pasekaZaprosy.push(q);
+		window.__sent.push({ file: 'bees', 'do': q['do'] });
+		setTimeout(fn, 250);
+	}
+	my.init = function () { close_all(); zapros({ 'do': 'bees_init' }, function () { otvet(); showDiv('bees'); }); };
+	my.close = function () { hideDiv('bees'); };
+	my.startFlight = function (id, tour) {
+		zapros({ 'do': 'bees_startflight', id: id, tour: tour }, function () {
+			if (PASEKA_OTKAZ) return otkaz('Сервер отказал нарочно');
+			var h = BEES_STATE.hives[id], t = BEES_CFG.tours[tour];
+			if (!h || !h.pid) { window.__danger.push('вылет пустого улья ' + id); return otkaz('Улей пуст'); }
+			if (h.tour_start && h.tour_remain > 0) { window.__danger.push('вылет летящего улья ' + id); return otkaz('Семья в пути'); }
+			if (!t) { window.__danger.push('неизвестный маршрут ' + tour); return otkaz('Нет такого маршрута'); }
+			if (t.money || t.coins) { window.__danger.push('платный маршрут ' + tour + ' для улья ' + id); return otkaz('Платный маршрут'); }
+			var flower = BEES_CFG.mapping[h.pid].pid;
+			if (!(BEES_GARDEN[flower] > 0)) { window.__danger.push('вылет без цветов, улей ' + id); return otkaz('Растения не посажены'); }
+			if ((BEES_STOCK[h.pid] || 0) >= BEES_CFG.new_capacity) { window.__danger.push('вылет при полных сотах, улей ' + id); return otkaz('Соты полны'); }
+			h.tour_start = NOW; h.tour_duration = t.duration; h.tour_remain = t.duration;
+			otvet();
+		});
+	};
+	my.fill = function () {
+		zapros({ 'do': 'bees_fill' }, function () {
+			if (PASEKA_BANKI_POLNY) return otkaz('Банки полны');
+			var moved = 0;
+			for (var pid in BEES_STOCK) {
+				if (BEES_STOCK[pid] >= BEES_CFG.max_capacity) { SHELF[pid] = (SHELF[pid] || 0) + BEES_STOCK[pid]; BEES_STOCK[pid] = 0; moved++; }
+			}
+			if (!moved) { window.__danger.push('разлив без полных сот'); return otkaz('В сотах недостаточно мёда'); }
+			otvet();
+		});
+	};
+	function opasno(name) { return function () { window.__danger.push('пасека: ' + name); }; }
+	my.startFlightAll = opasno('«отправить всех» (премиум)');
+	my.finishHiveTimer = opasno('ускорение за Coins');
+	my.finishHiveTimerCommit = opasno('окно ускорения');
+	my.buyHive = opasno('покупка улья');
+	my.upgradeHive = opasno('улучшение улья');
+	my.buyBooster = opasno('бустер');
+	my.buyBeekeeper = opasno('пчеловод');
+	my.changeHiveProduct = opasno('смена продукта');
+	my.buyResearch = opasno('исследование');
+	return my;
+})();
+
+if (/[?&]paseka_otkryta=1/.test(location.search) && PASEKA_EST) {
+	window.addEventListener('load', function () { bees.init(); });
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════
      ЛИСТОК ПОПРОШАЙКИ. Разметка и размеры — из style.css игры
      (`#wimpVerkauf` 320×400, список на top:90, сумма на top:310).
      ═══════════════════════════════════════════════════════════════ -->

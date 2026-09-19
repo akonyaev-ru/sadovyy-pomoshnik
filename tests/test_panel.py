@@ -282,8 +282,8 @@ def test_no_permanent_box(game):
         "return {fon:s.backgroundColor, ramka:s.borderTopWidth,"
         " kn:b.querySelectorAll('[data-si-button]').length}})()"
     )
-    # лейка, жук, обход, фонарь, рынок и почта (с 2026.7)
-    assert box["kn"] == 6, f"кнопок должно быть 6: {box}"
+    # лейка, жук, обход, фонарь, рынок, почта (с 2026.7) и пасека (с 2026.9)
+    assert box["kn"] == 7, f"кнопок должно быть 7: {box}"
     assert box["fon"] in ("rgba(0, 0, 0, 0)", "transparent"), f"у строки есть фон: {box}"
     assert box["ramka"] in ("0px", ""), f"у строки есть рамка: {box}"
 
@@ -456,13 +456,13 @@ def test_buttons_are_the_games_own_gnomes(server):
     """
     # Без автомата игры помощник рисует своего жука — тут и проверяем набор.
     with stand(server, "?bez_avtomata=1") as conn:
-        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button]').length===6",
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button]').length===7",
               "кнопки не появились")
         srcs = conn.evaluate(
             "(function(){var a=document.querySelectorAll('#si-helper [data-si-button]'),o=[];"
             "for(var i=0;i<a.length;i++)o.push(a[i].getAttribute('src')||'');return o})()"
         )
-    assert len(srcs) == 6, f"кнопок-картинок должно быть 6: {srcs}"
+    assert len(srcs) == 7, f"кнопок-картинок должно быть 7: {srcs}"
 
     joined = " ".join(srcs)
     assert "kannenzwerg.gif" in joined, "нет гнома с лейкой — того самого, что был у Ивана"
@@ -478,6 +478,7 @@ def test_buttons_are_the_games_own_gnomes(server):
     pochta = [s for s in srcs if s.startswith("data:image/png;base64,")]
     assert len(pochta) == 1, f"гном почты должен быть одной встроенной картинкой: {srcs}"
     assert "Vogelposticon01.gif" not in joined, "табличка почты вернулась в ряд гномов"
+    assert "pics/bees/beekeeper.png" in joined, "нет гнома-пчеловода — пасеки"
     # Жнец игры в стенде НАНЯТ, значит своего жнеца рисовать нельзя:
     # два жнеца в полосе — та же ошибка, что была с двумя жуками.
     assert "sensenzwerg.gif" not in joined, "свой жнец при нанятом жнеце игры — это второй жнец"
@@ -1334,7 +1335,7 @@ def test_panel_reports_its_own_state(game):
           "гномы не появились")
     _wait(game, "/^в саду/.test((window.SI_HELPER||{}).sostoyanie||'')", "состояние не выложено")
     state = game.evaluate("window.SI_HELPER.sostoyanie")
-    assert "гномов 6" in state, f"число гномов не сходится: {state}"
+    assert "гномов 7" in state, f"число гномов не сходится: {state}"
     assert "столбике" in state and "сад 1" in state, f"в состоянии нет садов: {state}"
 
     game.evaluate("zeigeStadtMain(1); true")
@@ -1842,3 +1843,120 @@ def test_round_skips_the_post_when_the_player_has_none(server):
         итог = _status(conn)
         assert "Почта" not in итог, итог
         assert conn.evaluate("window.__pochtaZaprosy.length") == 0, "обход ходил на почту, которой нет"
+
+
+# ── пасека ───────────────────────────────────────────────────────────
+
+
+def _paseka(conn):
+    """Что пасека отправила бы на сервер, и что стало с ульями и сотами."""
+    return conn.evaluate("""(function(){
+        var q = [];
+        window.__pasekaZaprosy.forEach(function(z){
+            var s = z['do'];
+            if (z.id !== undefined) s += ' id=' + z.id;
+            if (z.tour !== undefined) s += ' tour=' + z.tour;
+            q.push(s);
+        });
+        var letyat = [];
+        for (var k in BEES_STATE.hives) { var h = BEES_STATE.hives[k]; if (h.tour_start && h.tour_remain > 0) letyat.push(+k); }
+        return {zaprosy: q, danger: window.__danger, gde: window.__gdeMy, letyat: letyat,
+                soty312: BEES_STOCK[312], polka312: regal.getCount(312),
+                otkryta: getComputedStyle(document.getElementById('bees')).display !== 'none'};
+    })()""")
+
+
+def _zhdat_paseku(conn, timeout: float = 60.0) -> str:
+    _wait(conn, "/Пасека: отправлено/.test(" + _status_expr() + ")", "пасека не закончилась", timeout=timeout)
+    return _status(conn)
+
+
+def test_bees_gnome_appears_only_when_the_player_has_the_apiary(game, server):
+    """Гном-пчеловод — картинка игры, и только тем, у кого пасека есть."""
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button=bees]').length>0",
+          "гнома пасеки нет")
+    src = game.evaluate("document.querySelector('#si-helper [data-si-button=bees]').getAttribute('src')")
+    assert "pics/bees/beekeeper.png" in src, src
+    with stand(server, "?paseki=net") as conn:
+        time.sleep(1.5)
+        assert conn.evaluate("document.querySelectorAll('#si-helper [data-si-button=bees]').length") == 0, \
+            "гном пасеки нарисован игроку без пасеки"
+
+
+def test_bees_sends_returned_hives_their_own_way_and_bottles_full_combs(game):
+    """Одно нажатие: разлить полные соты, отправить вернувшихся тем же маршрутом.
+
+    Стенд: улей 1 летал «Тщательно» → снова «Тщательно»; 2 в полёте — не
+    трогать; 3 — цветы не посажены, сказать; 4 без истории → маршрутом
+    большинства («Тщательно»); 5 — соты полны → сперва разлить, потом
+    отправить; 6 не куплен; 7 летал платным маршрутом → сказать, не слать.
+    """
+    _wait(game, "document.querySelectorAll('#si-helper [data-si-button=bees]').length>0",
+          "гнома пасеки нет")
+    _press(game, "bees")
+    итог = _zhdat_paseku(game)
+    p = _paseka(game)
+    assert p["danger"] == [], f"пасека задела опасное: {p['danger']}"
+    assert p["zaprosy"] == [
+        "bees_init",
+        "bees_fill",
+        "bees_startflight id=1 tour=2",
+        "bees_startflight id=4 tour=2",
+        "bees_startflight id=5 tour=2",
+    ], p["zaprosy"]
+    assert "Пасека: отправлено 3 («Тщательно»), в полёте 1 (ближайший вернётся через 1 ч 23 мин)." in итог, итог
+    assert "Мёд разлит из 1 соты." in итог, итог
+    assert "улей 3: в садах не посажено Салат" in итог, итог
+    assert "улей 7: прошлый маршрут платный — не отправляю" in итог, итог
+    assert sorted(p["letyat"]) == [1, 2, 4, 5], p["letyat"]
+    assert p["soty312"] == 0 and p["polka312"] == 120000, p   # мёд ушёл на полку
+    assert not p["otkryta"], "пасека осталась открытой"
+    assert p["gde"][-1] == "garden1", p["gde"]
+
+
+def test_bees_stops_with_the_games_own_words_when_the_server_refuses(server):
+    """Отказ сервера — остановка с его словами, экран закрыт, гномы отпущены."""
+    with stand(server, "?paseka_otkaz=1") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=bees]').length>0",
+              "гнома пасеки нет")
+        _press(conn, "bees")
+        итог = _zhdat_paseku(conn, timeout=40)
+        p = _paseka(conn)
+        assert "Игра ответила" in итог and "Сервер отказал нарочно" in итог, итог
+        assert sum(1 for z in p["zaprosy"] if z.startswith("bees_startflight")) == 1, p["zaprosy"]
+        assert not p["otkryta"], "после отказа пасека осталась открытой"
+        assert conn.evaluate("!document.querySelector('#si-helper [data-si-button=bees]').disabled"), \
+            "после отказа гномы остались притушенными"
+
+
+def test_helpers_hide_behind_the_apiary_screen(server):
+    """Экран пасеки ложится поверх сада — гномы прячутся, как за почтой."""
+    with stand(server, "?paseka_otkryta=1") as conn:
+        _wait(conn, "getComputedStyle(document.getElementById('bees')).display !== 'none'",
+              "пасека не открылась")
+        _wait(conn, "(function(){var b=document.getElementById('si-helper');"
+                    "return b && getComputedStyle(b).display === 'none'})()",
+              "за открытой пасекой гномы остались на экране")
+        state = conn.evaluate("window.SI_HELPER && window.SI_HELPER.sostoyanie")
+        assert "пасека" in state, f"самоотчёт не назвал причину: {state}"
+        conn.evaluate("bees.close(); true")
+        _wait(conn, "getComputedStyle(document.getElementById('si-helper')).display !== 'none'",
+              "после закрытия пасеки гномы не вернулись")
+
+
+def test_bees_keeps_a_full_hive_home_when_the_honey_cannot_be_bottled(server):
+    """Разлить некуда — остальных всё равно отправляем, а улей с полными
+    сотами остаётся дома со словами: игра такой вылет не примет."""
+    with stand(server, "?paseka_banki_polny=1") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=bees]').length>0",
+              "гнома пасеки нет")
+        _press(conn, "bees")
+        итог = _zhdat_paseku(conn)
+        p = _paseka(conn)
+        assert p["danger"] == [], p["danger"]
+        assert [z for z in p["zaprosy"] if z.startswith("bees_startflight")] == [
+            "bees_startflight id=1 tour=2", "bees_startflight id=4 tour=2"], p["zaprosy"]
+        assert "отправлено 2" in итог, итог
+        assert "мёд не разлит: Игра ответила: Ошибка Банки полны" in итог, итог
+        assert "улей 5: соты полны, мёд некуда складывать" in итог, итог
+        assert not p["otkryta"], "пасека осталась открытой"

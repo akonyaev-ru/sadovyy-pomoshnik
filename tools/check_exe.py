@@ -201,6 +201,11 @@ def _check(proc: subprocess.Popen) -> int:
                 " && g.complete && g.naturalWidth>0"
                 " && (n.getAttribute('src')||'').indexOf('Vogelposticon01')>=0})()"
             ),
+            # Пасека — выпуск 2026.9: гном-пчеловод самой игры.
+            "пасека на месте": conn.evaluate(
+                "(document.querySelector('#si-helper [data-si-button=bees]')"
+                ".getAttribute('src')||'').indexOf('pics/bees/beekeeper.png')>=0"
+            ),
         }
 
         conn.evaluate("document.querySelector('#si-helper [data-si-button=water]').click(); true")

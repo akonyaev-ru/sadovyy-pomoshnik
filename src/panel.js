@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Садовый помощник
 // @namespace    si-helper
-// @version      2026.8
+// @version      2026.9
 // @description  Кнопки-помощники внутри игры. Действует только по нажатию.
 // @match        https://*.molehillempire.com/*
 // @match        https://*.sadowajaimperija.ru/*
@@ -1126,433 +1126,647 @@
 				}, function (err) { закрыть(); throw err; });
 		}
 
-		/*
-		 * ═══ ПТИЧЬЯ ПОЧТА: ПТИЦЫ РАБОТАЮТ ПО ВСЕМ СКВОРЕЧНИКАМ ══════
-		 *
-		 * Разобрано по объекту `birds` из wurzel_all.js и по живой игре
-		 * 2026-09-18 (см. docs/game-api.md, «Птичья почта»). Один заказ —
-		 * одна птица: заказ ждёт в слоте, игрок выбирает скворечник, чья
-		 * птица тянет груз и выносливость, продукты уходят с полки, птица
-		 * летит, потом «Забрать вознаграждение» — и в слоте тут же новый
-		 * заказ. Выносливость кормится ягодами с полки; вылеты кончаются,
-		 * птица уходит «на пенсию», в пустой скворечник покупают новую.
-		 * У игрока это десяток нажатий на каждый заказ, и заказы висят
-		 * готовыми часами.
-		 *
-		 * Что делаем одним нажатием, ровно её же функциями:
-		 *   1. забираем готовые награды (`finishJob`);
-		 *   2. в опустевший скворечник покупаем ТУ ЖЕ породу — только за сТ
-		 *      (решение владельца 2026-09-18; Попугай за Coins — никогда);
-		 *   3. ждущие заказы раздаём свободным птицам: тяжёлый заказ —
-		 *      самой слабой птице, которая его тянет, чтобы сильная
-		 *      оставалась под тяжёлые; не хватает выносливости — сперва
-		 *      кормим (`feedBird`), как сделал бы игрок;
-		 *   4. чего сделать нельзя — говорим словами: какого продукта не
-		 *      хватает, какой скворечник пуст.
-		 *
-		 * ЧЕГО НЕ ДЕЛАЕМ НИКОГДА: ускорений (300 Coins), отмены заказа
-		 * (решение владельца — только сообщать), покупок за Coins и перья,
-		 * соревнований (слот `pvp`), бонусов, специализаций.
-		 *
-		 * Каждый шаг — запрос к серверу, и «сделано» мы считаем только по
-		 * ответу: `birds.data` игра заменяет целиком, по нему и ждём.
-		 */
-		var POST_PASSES = 5;        // кругов «забрать → купить → раздать» за одно нажатие
-		var POST_WAIT_MS = 15000;   // сколько ждём ответа сервера на один шаг
-
-		function post() {
-			var b = window.birds;
-			if (!b || typeof b.init !== 'function' || typeof b.startJob !== 'function') return null;
-			return b;
-		}
-
-		function postData() {
-			var b = post();
-			var d = b && b.data;
-			return (d && d.config && d.data) ? d : null;
-		}
-
-		function postOpen() {
-			var e = document.getElementById('birds');
-			if (!e) return false;
-			try { return getComputedStyle(e).display !== 'none'; } catch (err) { return false; }
-		}
-
-		function num(x) { var n = parseFloat(x); return isNaN(n) ? 0 : n; }
-
-		// Диалог игры посреди цикла — это её отказ (нет продукта, нет денег):
-		// сервер ответил ошибкой, `ajax.error` показал её словами, а данные
-		// не пришли. Читаем эти слова, чтобы отдать игроку, а не «не ответила».
-		function gameDialogText() {
-			try {
-				var d = document.getElementById('baseDialog');
-				if (!d || getComputedStyle(d).display === 'none') return '';
-				var t = document.getElementById('baseDialogText');
-				return t ? String(t.textContent || '').replace(/\s+/g, ' ').trim() : '';
-			} catch (e) { return ''; }
-		}
-
-		function postWait(get) {
-			var deadline = Date.now() + POST_WAIT_MS;
-			return new Promise(function (resolve, reject) {
-				(function tick() {
-					var v;
-					try { v = get(); } catch (e) { v = null; }
-					if (v) return resolve(v);
-					var said = gameDialogText();
-					if (said) return reject(new Error('Игра ответила: ' + said));
-					if (Date.now() > deadline) return reject(new Error('почта не ответила вовремя'));
-					setTimeout(tick, 200);
-				})();
-			});
-		}
-
-		function openPost() {
-			var b = post();
-			if (!b) return Promise.reject(new Error('Птичьей почты на странице нет.'));
-			if (!hasLocation('birds')) return Promise.reject(new Error('У вас нет птичьей почты.'));
-			if (!(postOpen() && postData())) {
-				try { goTo('birds'); b.init(); }
-				catch (e) { return Promise.reject(new Error('Не получилось открыть птичью почту.')); }
-			}
-			return postWait(function () { return postOpen() && !!postData(); });
-		}
-
-		// Назад в сад — тем же путём, что быстрая навигация игры:
-		// `setLocation` сам закрывает почту и возвращает полку.
-		function closePost() {
-			var n = currentGarden();
-			try { if (post()) post().close(); } catch (e) { /* уже закрыта */ }
-			goTo(n ? 'garden' + n : 'garden');
-		}
-
-		// Слоты заказов, которые у игрока есть и в которых обычные заказы.
-		function postSlots(d) {
-			var out = [];
-			for (var s in d.config.jobslots) {
-				var c = d.config.jobslots[s];
-				if (c.pvp || c.comingsoon) continue;                       // соревнование — не наше
-				if (num(c.level) > num(d.data.level)) continue;            // заперт уровнем
-				if (num(s) > 1 && !(d.data.jobslots && d.data.jobslots[s])) continue;   // не куплен
-				out.push(s);
-			}
-			return out;
-		}
-
-		function jobOf(d, s) { return (d.data.jobs && d.data.jobs[s]) || null; }
-		function jobRunning(j) { return !!j && num(j.startdate) > 0; }
-		function jobReady(j) { return jobRunning(j) && num(j.remain) <= 0; }
-		function jobPending(j) {
-			return !!j && num(j.startdate) <= 0 && !(num(j.remove_remain) > 0) && !(num(j.house) > 0);
-		}
-
-		// Скворечник действует: куплен и, если арендован, аренда не вышла.
-		function houseActive(d, h) {
-			var hd = d.data.houses && d.data.houses[h];
-			if (!hd) return false;
-			var hc = d.config.houses[h] || {};
-			if (num(hc.level) > num(d.data.level)) return false;
-			if (hc.rent && num(hd.remain) <= 0) return false;
-			return true;
-		}
-
-		function birdLoad(d, h) {
-			var hd = d.data.houses[h], bc = d.config.birds[hd.bird.type] || {};
-			var load = num(bc.load);
-			if (hd.special && d.config.special[hd.special]) load += num(d.config.special[hd.special].load);
-			return load;
-		}
-
-		function shelfMissing(products) {
-			var out = [];
-			for (var p in products) {
-				var have = num(window.regal && regal.getCount(p)), need = num(products[p]);
-				if (have < need) {
-					out.push({ pid: p, need: need - have,
-					           name: (window.data_products && data_products[p] && data_products[p].name) || ('продукт ' + p) });
-				}
-			}
-			return out;
-		}
-
-		function feedable(d, h) {
-			var b = d.data.houses[h].bird;
-			return !!(b && b.feed) && shelfMissing(b.feed).length === 0;
-		}
-
-		// Лучшая птица за сТ, доступная по уровню почты: когда породу
-		// ушедшей узнать негде (скворечник был пуст ещё до нас).
-		function bestMoneyBird(d) {
-			var best = null, bestLevel = -1;
-			for (var t in d.config.birds) {
-				var c = d.config.birds[t];
-				if (!(num(c.money) > 0) || num(c.coins) > 0 || num(c.feathers) > 0) continue;
-				if (num(c.level) > num(d.data.level)) continue;
-				if (num(c.level) > bestLevel) { bestLevel = num(c.level); best = t; }
-			}
-			return best;
-		}
-
-		function missingText(list) {
-			var parts = [];
-			for (var i = 0; i < list.length; i++) parts.push(list[i].name + ' ×' + list[i].need);
-			return parts.join(', ');
-		}
-
-		/*
-		 * Один круг: забрать → купить → раздать. Возвращает, сколько всего
-		 * сделал; ноль — можно останавливаться. Каждое действие ждёт ответа
-		 * сервера, а награду ловим на её же `showRewards`: игра зовёт его с
-		 * тем, что прислал сервер, — в том числе с «птица ушла на пенсию».
-		 */
-		function postPass(итог, известно) {
-			var b = post(), d = postData();
-			if (!b || !d) return Promise.reject(new Error('Почта ещё не загрузилась.'));
-			var сделано = 0;
-			var slots = postSlots(d);
-
-			function запомнитьПтиц() {
-				var dd = postData();
-				for (var h in dd.data.houses) {
-					if (dd.data.houses[h].bird) известно[h] = dd.data.houses[h].bird.type;
-				}
-			}
-			запомнитьПтиц();
-
-			// ── 1. забрать готовые ────────────────────────────────────
-			var i = 0;
-			function забрать() {
-				for (; i < slots.length; i++) {
-					var s = slots[i], dd = postData(), j = jobOf(dd, s);
-					if (!jobReady(j)) continue;
-					if (!houseActive(dd, j.house)) {
-						итог.заметки.push('заказ ' + s + ' готов, но скворечник ' + j.house + ' не действует');
-						continue;
-					}
-					var было = j.id, дом = j.house;
-					notify.wait('Почта: забираю заказ ' + s);
-					b.currentJobSlot = num(s);
-					try { b.finishJob(); }
-					catch (e) { return Promise.reject(new Error('Не получилось забрать заказ ' + s + '.')); }
-					i++;
-					return postWait(function () {
-						var x = jobOf(postData(), s);
-						return !x || x.id !== было || !jobRunning(x);
-					}).then(function () {
-						сделано++;
-						итог.забрано++;
-						var r = итог.последняяНаграда;
-						if (r && r.birdgone) итог.ушли.push({ house: дом, type: r.birdgone });
-						итог.последняяНаграда = null;
-						return sleep(PACE_MS).then(забрать);
-					});
-				}
-				return Promise.resolve();
-			}
-
-			// ── 2. купить птицу в пустой скворечник ───────────────────
-			function купить() {
-				var dd = postData();
-				for (var h in dd.data.houses) {
-					if (!houseActive(dd, h) || dd.data.houses[h].bird) continue;
-					if (итог.пустые[h]) continue;                 // уже разобрались с ним в этот раз
-					итог.пустые[h] = true;
-					var type = известно[h] || bestMoneyBird(dd);
-					var c = type && dd.config.birds[type];
-					var name = (window.t_birds_birdnames && t_birds_birdnames[type]) || ('птица ' + type);
-					if (!c || !(num(c.money) > 0) || num(c.coins) > 0 || num(c.feathers) > 0) {
-						итог.заметки.push('скворечник ' + h + ' пуст: ' + name + ' продаётся не за сТ — купите сами');
-						continue;
-					}
-					if (num(window.player_bar) < num(c.money)) {
-						итог.заметки.push('скворечник ' + h + ' пуст: на ' + name + ' не хватает сТ');
-						continue;
-					}
-					notify.wait('Почта: покупаю ' + name + ' в скворечник ' + h);
-					try { b.buyBird(num(h), num(type)); }
-					catch (e) { return Promise.reject(new Error('Не получилось купить птицу.')); }
-					return postWait(function () {
-						var x = postData().data.houses[h];
-						return !!(x && x.bird);
-					}).then(function () {
-						сделано++;
-						итог.куплено.push(name + ' за ' + moneyText(num(c.money)));
-						return sleep(PACE_MS).then(купить);
-					});
-				}
-				return Promise.resolve();
-			}
-
-			// ── 3. раздать ждущие заказы ──────────────────────────────
-			function раздать() {
-				var dd = postData();
-				var busy = {}, s, j;
-				for (s in dd.data.jobs) {
-					j = dd.data.jobs[s];
-					if (jobRunning(j) && num(j.house) > 0) busy[j.house] = true;
-				}
-				// Тяжёлые заказы первыми: им годится меньше птиц.
-				var pending = [];
-				for (var k = 0; k < slots.length; k++) {
-					j = jobOf(dd, slots[k]);
-					if (jobPending(j) && !итог.ждут[slots[k]]) pending.push(slots[k]);
-				}
-				pending.sort(function (a, c) {
-					var ja = jobOf(dd, a), jc = jobOf(dd, c);
-					var la = num(dd.config.packagesize[ja.size].load), lc = num(dd.config.packagesize[jc.size].load);
-					return (lc - la) || (num(jc.endurance) - num(ja.endurance));
-				});
-
-				for (var n = 0; n < pending.length; n++) {
-					s = pending[n]; j = jobOf(dd, s);
-					var needLoad = num(dd.config.packagesize[j.size].load), needEnd = num(j.endurance);
-					var missing = shelfMissing(j.products);
-					if (missing.length) {
-						итог.ждут[s] = 'не хватает ' + missingText(missing);
-						continue;
-					}
-					var best = null;
-					for (var h in dd.data.houses) {
-						if (busy[h] || !houseActive(dd, h) || !dd.data.houses[h].bird) continue;
-						var bird = dd.data.houses[h].bird;
-						if (birdLoad(dd, h) < needLoad) continue;
-						var сыт = num(bird.endurance) >= needEnd;
-						if (!сыт && !(num(bird.endurance_max) >= needEnd && feedable(dd, h))) continue;
-						var cand = { house: h, load: birdLoad(dd, h), feed: !сыт, end: num(bird.endurance) };
-						if (!best || cand.load < best.load ||
-						    (cand.load === best.load && (best.feed && !cand.feed)) ||
-						    (cand.load === best.load && cand.feed === best.feed && cand.end > best.end)) best = cand;
-					}
-					if (!best) {
-						итог.ждут[s] = 'нет свободной птицы: нужна сила ' + needLoad + ' и выносливость ' + needEnd;
-						continue;
-					}
-					busy[best.house] = true;
-					return (best.feed ? покормить(best.house) : Promise.resolve())
-						.then(function () {
-							var x = postData().data.houses[best.house].bird;
-							if (num(x.endurance) < needEnd) {
-								итог.ждут[s] = 'птице в скворечнике ' + best.house + ' не хватило выносливости и после корма';
-								return null;
-							}
-							return отправить(s, best.house);
-						})
-						.then(function () { return sleep(PACE_MS).then(раздать); });
-				}
-				return Promise.resolve();
-			}
-
-			function покормить(h) {
-				var было = num(postData().data.houses[h].bird.endurance);
-				notify.wait('Почта: кормлю птицу в скворечнике ' + h);
-				try { b.feedBird(num(h)); }
-				catch (e) { return Promise.reject(new Error('Не получилось покормить птицу.')); }
-				return postWait(function () {
-					var x = postData().data.houses[h];
-					return !!(x && x.bird && num(x.bird.endurance) > было);
-				}).then(function () { сделано++; итог.покормлено++; return sleep(PACE_MS); });
-			}
-
-			function отправить(s, h) {
-				var dd = postData();
-				notify.wait('Почта: отправляю заказ ' + s + ' из скворечника ' + h);
-				b.currentJobSlot = num(s);
-				b.currentJobHouseSlot = num(h);
-				b.currentJobBird = num(dd.data.houses[h].bird.type);
-				try { b.startJob(); }
-				catch (e) { return Promise.reject(new Error('Не получилось отправить заказ ' + s + '.')); }
-				return postWait(function () { return jobRunning(jobOf(postData(), s)); })
-					.then(function () { сделано++; итог.отправлено++; });
-			}
-
-			return забрать().then(купить).then(раздать).then(function () { return сделано; });
-		}
-
-		function postSummary(итог) {
-			var parts = ['забрано ' + итог.забрано, 'отправлено ' + итог.отправлено, 'покормлено ' + итог.покормлено];
-			var s = 'Почта: ' + parts.join(', ') + '.';
-			if (итог.перья > 0) s += ' Перьев +' + итог.перья + '.';
-			if (итог.куплено.length) s += ' Куплено: ' + итог.куплено.join(', ') + '.';
-			var ждут = [];
-			for (var k in итог.ждут) ждут.push('заказ ' + k + ' — ' + итог.ждут[k]);
-			if (ждут.length) s += ' Ждёт: ' + ждут.join('; ') + '.';
-			if (итог.заметки.length) s += ' ' + итог.заметки.join('. ') + '.';
-			return s;
-		}
-
-		function newPostTotal() {
-			return { забрано: 0, отправлено: 0, покормлено: 0, перья: 0, куплено: [],
-			         ушли: [], пустые: {}, ждут: {}, заметки: [], последняяНаграда: null };
-		}
-
-		/*
-		 * Весь цикл на открытой почте. Награду игра показывает своим окном
-		 * на каждый заказ — на время цикла подменяем `showRewards` на
-		 * подсчёт, итог скажем одним шариком; после — возвращаем как было.
-		 */
-		function workPost(итог) {
-			var b = post();
-			var было = b.showRewards, перьяБыло = num(postData().data.feather);
-			var известно = {};
-			b.showRewards = function (r) { итог.последняяНаграда = r || null; };
-
-			var pass = 0;
-			function круг() {
-				if (pass >= POST_PASSES) return Promise.resolve();
-				pass++;
-				return postPass(итог, известно).then(function (n) { return n ? круг() : null; });
-			}
-
-			function вернуть() {
-				if (b.showRewards === undefined) return;
-				// Свойство экземпляра прятало прототип — снимаем, если было так.
-				if (Object.prototype.hasOwnProperty.call(b, 'showRewards') && было === b.constructor.prototype.showRewards) {
-					delete b.showRewards;
-				} else {
-					b.showRewards = было;
-				}
-				try { итог.перья = Math.max(0, num(postData().data.feather) - перьяБыло); } catch (e) { /* без перьев */ }
-			}
-
-			return круг().then(function () { вернуть(); }, function (err) { вернуть(); throw err; });
-		}
-
-		function runPost() {
-			if (running) return;
-			if (!post() || !hasLocation('birds')) {
-				notify.error('Птичьей почты у вас нет — кнопке нечего делать.');
-				return;
-			}
-			var итог = newPostTotal();
-			busy(true);
-			notify.wait('Открываю птичью почту');
-			openPost()
-				.then(function () { return workPost(итог); })
-				.then(function () {
-					closePost();
-					notify.info(postSummary(итог));
-				}, function (err) {
-					try { closePost(); } catch (e) { /* вернёмся как выйдет */ }
-					notify.error((err && err.message ? err.message : 'Почта не закончена.') +
-						' Успел: ' + postSummary(итог));
-				})
-				.then(otpustit, otpustit);
-		}
-
-		// Почта — последняя остановка обхода. Нет её у игрока — молча мимо.
-		function roundPost(итог) {
-			if (!post() || !hasLocation('birds')) return Promise.resolve();
-			var п = newPostTotal();
-			итог.почта = п;
-			notify.wait('Почта');
-			return openPost()
-				.then(function () { return workPost(п); })
-				.then(function () { closePost(); }, function (err) {
-					try { closePost(); } catch (e) { /* вернёмся как выйдет */ }
-					п.заметки.push(err && err.message ? err.message : 'почта не закончена');
-				});
-		}
-
+		/*
+		 * ═══ ПТИЧЬЯ ПОЧТА: ПТИЦЫ РАБОТАЮТ ПО ВСЕМ СКВОРЕЧНИКАМ ══════
+		 *
+		 * Разобрано по объекту `birds` из wurzel_all.js и по живой игре
+		 * 2026-09-18 (см. docs/game-api.md, «Птичья почта»). Один заказ —
+		 * одна птица: заказ ждёт в слоте, игрок выбирает скворечник, чья
+		 * птица тянет груз и выносливость, продукты уходят с полки, птица
+		 * летит, потом «Забрать вознаграждение» — и в слоте тут же новый
+		 * заказ. Выносливость кормится ягодами с полки; вылеты кончаются,
+		 * птица уходит «на пенсию», в пустой скворечник покупают новую.
+		 * У игрока это десяток нажатий на каждый заказ, и заказы висят
+		 * готовыми часами.
+		 *
+		 * Что делаем одним нажатием, ровно её же функциями:
+		 *   1. забираем готовые награды (`finishJob`);
+		 *   2. в опустевший скворечник покупаем ТУ ЖЕ породу — только за сТ
+		 *      (решение владельца 2026-09-18; Попугай за Coins — никогда);
+		 *   3. ждущие заказы раздаём свободным птицам: тяжёлый заказ —
+		 *      самой слабой птице, которая его тянет, чтобы сильная
+		 *      оставалась под тяжёлые; не хватает выносливости — сперва
+		 *      кормим (`feedBird`), как сделал бы игрок;
+		 *   4. чего сделать нельзя — говорим словами: какого продукта не
+		 *      хватает, какой скворечник пуст.
+		 *
+		 * ЧЕГО НЕ ДЕЛАЕМ НИКОГДА: ускорений (300 Coins), отмены заказа
+		 * (решение владельца — только сообщать), покупок за Coins и перья,
+		 * соревнований (слот `pvp`), бонусов, специализаций.
+		 *
+		 * Каждый шаг — запрос к серверу, и «сделано» мы считаем только по
+		 * ответу: `birds.data` игра заменяет целиком, по нему и ждём.
+		 */
+		var POST_PASSES = 5;        // кругов «забрать → купить → раздать» за одно нажатие
+		var POST_WAIT_MS = 15000;   // сколько ждём ответа сервера на один шаг
+
+		function post() {
+			var b = window.birds;
+			if (!b || typeof b.init !== 'function' || typeof b.startJob !== 'function') return null;
+			return b;
+		}
+
+		function postData() {
+			var b = post();
+			var d = b && b.data;
+			return (d && d.config && d.data) ? d : null;
+		}
+
+		function postOpen() {
+			var e = document.getElementById('birds');
+			if (!e) return false;
+			try { return getComputedStyle(e).display !== 'none'; } catch (err) { return false; }
+		}
+
+		function num(x) { var n = parseFloat(x); return isNaN(n) ? 0 : n; }
+
+		// Диалог игры посреди цикла — это её отказ (нет продукта, нет денег):
+		// сервер ответил ошибкой, `ajax.error` показал её словами, а данные
+		// не пришли. Читаем эти слова, чтобы отдать игроку, а не «не ответила».
+		function gameDialogText() {
+			try {
+				var d = document.getElementById('baseDialog');
+				if (!d || getComputedStyle(d).display === 'none') return '';
+				var t = document.getElementById('baseDialogText');
+				return t ? String(t.textContent || '').replace(/\s+/g, ' ').trim() : '';
+			} catch (e) { return ''; }
+		}
+
+		function postWait(get) {
+			var deadline = Date.now() + POST_WAIT_MS;
+			return new Promise(function (resolve, reject) {
+				(function tick() {
+					var v;
+					try { v = get(); } catch (e) { v = null; }
+					if (v) return resolve(v);
+					var said = gameDialogText();
+					if (said) return reject(new Error('Игра ответила: ' + said));
+					if (Date.now() > deadline) return reject(new Error('почта не ответила вовремя'));
+					setTimeout(tick, 200);
+				})();
+			});
+		}
+
+		function openPost() {
+			var b = post();
+			if (!b) return Promise.reject(new Error('Птичьей почты на странице нет.'));
+			if (!hasLocation('birds')) return Promise.reject(new Error('У вас нет птичьей почты.'));
+			if (!(postOpen() && postData())) {
+				try { goTo('birds'); b.init(); }
+				catch (e) { return Promise.reject(new Error('Не получилось открыть птичью почту.')); }
+			}
+			return postWait(function () { return postOpen() && !!postData(); });
+		}
+
+		// Назад в сад — тем же путём, что быстрая навигация игры:
+		// `setLocation` сам закрывает почту и возвращает полку.
+		function closePost() {
+			var n = currentGarden();
+			try { if (post()) post().close(); } catch (e) { /* уже закрыта */ }
+			goTo(n ? 'garden' + n : 'garden');
+		}
+
+		// Слоты заказов, которые у игрока есть и в которых обычные заказы.
+		function postSlots(d) {
+			var out = [];
+			for (var s in d.config.jobslots) {
+				var c = d.config.jobslots[s];
+				if (c.pvp || c.comingsoon) continue;                       // соревнование — не наше
+				if (num(c.level) > num(d.data.level)) continue;            // заперт уровнем
+				if (num(s) > 1 && !(d.data.jobslots && d.data.jobslots[s])) continue;   // не куплен
+				out.push(s);
+			}
+			return out;
+		}
+
+		function jobOf(d, s) { return (d.data.jobs && d.data.jobs[s]) || null; }
+		function jobRunning(j) { return !!j && num(j.startdate) > 0; }
+		function jobReady(j) { return jobRunning(j) && num(j.remain) <= 0; }
+		function jobPending(j) {
+			return !!j && num(j.startdate) <= 0 && !(num(j.remove_remain) > 0) && !(num(j.house) > 0);
+		}
+
+		// Скворечник действует: куплен и, если арендован, аренда не вышла.
+		function houseActive(d, h) {
+			var hd = d.data.houses && d.data.houses[h];
+			if (!hd) return false;
+			var hc = d.config.houses[h] || {};
+			if (num(hc.level) > num(d.data.level)) return false;
+			if (hc.rent && num(hd.remain) <= 0) return false;
+			return true;
+		}
+
+		function birdLoad(d, h) {
+			var hd = d.data.houses[h], bc = d.config.birds[hd.bird.type] || {};
+			var load = num(bc.load);
+			if (hd.special && d.config.special[hd.special]) load += num(d.config.special[hd.special].load);
+			return load;
+		}
+
+		function shelfMissing(products) {
+			var out = [];
+			for (var p in products) {
+				var have = num(window.regal && regal.getCount(p)), need = num(products[p]);
+				if (have < need) {
+					out.push({ pid: p, need: need - have,
+					           name: (window.data_products && data_products[p] && data_products[p].name) || ('продукт ' + p) });
+				}
+			}
+			return out;
+		}
+
+		function feedable(d, h) {
+			var b = d.data.houses[h].bird;
+			return !!(b && b.feed) && shelfMissing(b.feed).length === 0;
+		}
+
+		// Лучшая птица за сТ, доступная по уровню почты: когда породу
+		// ушедшей узнать негде (скворечник был пуст ещё до нас).
+		function bestMoneyBird(d) {
+			var best = null, bestLevel = -1;
+			for (var t in d.config.birds) {
+				var c = d.config.birds[t];
+				if (!(num(c.money) > 0) || num(c.coins) > 0 || num(c.feathers) > 0) continue;
+				if (num(c.level) > num(d.data.level)) continue;
+				if (num(c.level) > bestLevel) { bestLevel = num(c.level); best = t; }
+			}
+			return best;
+		}
+
+		function missingText(list) {
+			var parts = [];
+			for (var i = 0; i < list.length; i++) parts.push(list[i].name + ' ×' + list[i].need);
+			return parts.join(', ');
+		}
+
+		/*
+		 * Один круг: забрать → купить → раздать. Возвращает, сколько всего
+		 * сделал; ноль — можно останавливаться. Каждое действие ждёт ответа
+		 * сервера, а награду ловим на её же `showRewards`: игра зовёт его с
+		 * тем, что прислал сервер, — в том числе с «птица ушла на пенсию».
+		 */
+		function postPass(итог, известно) {
+			var b = post(), d = postData();
+			if (!b || !d) return Promise.reject(new Error('Почта ещё не загрузилась.'));
+			var сделано = 0;
+			var slots = postSlots(d);
+
+			function запомнитьПтиц() {
+				var dd = postData();
+				for (var h in dd.data.houses) {
+					if (dd.data.houses[h].bird) известно[h] = dd.data.houses[h].bird.type;
+				}
+			}
+			запомнитьПтиц();
+
+			// ── 1. забрать готовые ────────────────────────────────────
+			var i = 0;
+			function забрать() {
+				for (; i < slots.length; i++) {
+					var s = slots[i], dd = postData(), j = jobOf(dd, s);
+					if (!jobReady(j)) continue;
+					if (!houseActive(dd, j.house)) {
+						итог.заметки.push('заказ ' + s + ' готов, но скворечник ' + j.house + ' не действует');
+						continue;
+					}
+					var было = j.id, дом = j.house;
+					notify.wait('Почта: забираю заказ ' + s);
+					b.currentJobSlot = num(s);
+					try { b.finishJob(); }
+					catch (e) { return Promise.reject(new Error('Не получилось забрать заказ ' + s + '.')); }
+					i++;
+					return postWait(function () {
+						var x = jobOf(postData(), s);
+						return !x || x.id !== было || !jobRunning(x);
+					}).then(function () {
+						сделано++;
+						итог.забрано++;
+						var r = итог.последняяНаграда;
+						if (r && r.birdgone) итог.ушли.push({ house: дом, type: r.birdgone });
+						итог.последняяНаграда = null;
+						return sleep(PACE_MS).then(забрать);
+					});
+				}
+				return Promise.resolve();
+			}
+
+			// ── 2. купить птицу в пустой скворечник ───────────────────
+			function купить() {
+				var dd = postData();
+				for (var h in dd.data.houses) {
+					if (!houseActive(dd, h) || dd.data.houses[h].bird) continue;
+					if (итог.пустые[h]) continue;                 // уже разобрались с ним в этот раз
+					итог.пустые[h] = true;
+					var type = известно[h] || bestMoneyBird(dd);
+					var c = type && dd.config.birds[type];
+					var name = (window.t_birds_birdnames && t_birds_birdnames[type]) || ('птица ' + type);
+					if (!c || !(num(c.money) > 0) || num(c.coins) > 0 || num(c.feathers) > 0) {
+						итог.заметки.push('скворечник ' + h + ' пуст: ' + name + ' продаётся не за сТ — купите сами');
+						continue;
+					}
+					if (num(window.player_bar) < num(c.money)) {
+						итог.заметки.push('скворечник ' + h + ' пуст: на ' + name + ' не хватает сТ');
+						continue;
+					}
+					notify.wait('Почта: покупаю ' + name + ' в скворечник ' + h);
+					try { b.buyBird(num(h), num(type)); }
+					catch (e) { return Promise.reject(new Error('Не получилось купить птицу.')); }
+					return postWait(function () {
+						var x = postData().data.houses[h];
+						return !!(x && x.bird);
+					}).then(function () {
+						сделано++;
+						итог.куплено.push(name + ' за ' + moneyText(num(c.money)));
+						return sleep(PACE_MS).then(купить);
+					});
+				}
+				return Promise.resolve();
+			}
+
+			// ── 3. раздать ждущие заказы ──────────────────────────────
+			function раздать() {
+				var dd = postData();
+				var busy = {}, s, j;
+				for (s in dd.data.jobs) {
+					j = dd.data.jobs[s];
+					if (jobRunning(j) && num(j.house) > 0) busy[j.house] = true;
+				}
+				// Тяжёлые заказы первыми: им годится меньше птиц.
+				var pending = [];
+				for (var k = 0; k < slots.length; k++) {
+					j = jobOf(dd, slots[k]);
+					if (jobPending(j) && !итог.ждут[slots[k]]) pending.push(slots[k]);
+				}
+				pending.sort(function (a, c) {
+					var ja = jobOf(dd, a), jc = jobOf(dd, c);
+					var la = num(dd.config.packagesize[ja.size].load), lc = num(dd.config.packagesize[jc.size].load);
+					return (lc - la) || (num(jc.endurance) - num(ja.endurance));
+				});
+
+				for (var n = 0; n < pending.length; n++) {
+					s = pending[n]; j = jobOf(dd, s);
+					var needLoad = num(dd.config.packagesize[j.size].load), needEnd = num(j.endurance);
+					var missing = shelfMissing(j.products);
+					if (missing.length) {
+						итог.ждут[s] = 'не хватает ' + missingText(missing);
+						continue;
+					}
+					var best = null;
+					for (var h in dd.data.houses) {
+						if (busy[h] || !houseActive(dd, h) || !dd.data.houses[h].bird) continue;
+						var bird = dd.data.houses[h].bird;
+						if (birdLoad(dd, h) < needLoad) continue;
+						var сыт = num(bird.endurance) >= needEnd;
+						if (!сыт && !(num(bird.endurance_max) >= needEnd && feedable(dd, h))) continue;
+						var cand = { house: h, load: birdLoad(dd, h), feed: !сыт, end: num(bird.endurance) };
+						if (!best || cand.load < best.load ||
+						    (cand.load === best.load && (best.feed && !cand.feed)) ||
+						    (cand.load === best.load && cand.feed === best.feed && cand.end > best.end)) best = cand;
+					}
+					if (!best) {
+						итог.ждут[s] = 'нет свободной птицы: нужна сила ' + needLoad + ' и выносливость ' + needEnd;
+						continue;
+					}
+					busy[best.house] = true;
+					return (best.feed ? покормить(best.house) : Promise.resolve())
+						.then(function () {
+							var x = postData().data.houses[best.house].bird;
+							if (num(x.endurance) < needEnd) {
+								итог.ждут[s] = 'птице в скворечнике ' + best.house + ' не хватило выносливости и после корма';
+								return null;
+							}
+							return отправить(s, best.house);
+						})
+						.then(function () { return sleep(PACE_MS).then(раздать); });
+				}
+				return Promise.resolve();
+			}
+
+			function покормить(h) {
+				var было = num(postData().data.houses[h].bird.endurance);
+				notify.wait('Почта: кормлю птицу в скворечнике ' + h);
+				try { b.feedBird(num(h)); }
+				catch (e) { return Promise.reject(new Error('Не получилось покормить птицу.')); }
+				return postWait(function () {
+					var x = postData().data.houses[h];
+					return !!(x && x.bird && num(x.bird.endurance) > было);
+				}).then(function () { сделано++; итог.покормлено++; return sleep(PACE_MS); });
+			}
+
+			function отправить(s, h) {
+				var dd = postData();
+				notify.wait('Почта: отправляю заказ ' + s + ' из скворечника ' + h);
+				b.currentJobSlot = num(s);
+				b.currentJobHouseSlot = num(h);
+				b.currentJobBird = num(dd.data.houses[h].bird.type);
+				try { b.startJob(); }
+				catch (e) { return Promise.reject(new Error('Не получилось отправить заказ ' + s + '.')); }
+				return postWait(function () { return jobRunning(jobOf(postData(), s)); })
+					.then(function () { сделано++; итог.отправлено++; });
+			}
+
+			return забрать().then(купить).then(раздать).then(function () { return сделано; });
+		}
+
+		function postSummary(итог) {
+			var parts = ['забрано ' + итог.забрано, 'отправлено ' + итог.отправлено, 'покормлено ' + итог.покормлено];
+			var s = 'Почта: ' + parts.join(', ') + '.';
+			if (итог.перья > 0) s += ' Перьев +' + итог.перья + '.';
+			if (итог.куплено.length) s += ' Куплено: ' + итог.куплено.join(', ') + '.';
+			var ждут = [];
+			for (var k in итог.ждут) ждут.push('заказ ' + k + ' — ' + итог.ждут[k]);
+			if (ждут.length) s += ' Ждёт: ' + ждут.join('; ') + '.';
+			if (итог.заметки.length) s += ' ' + итог.заметки.join('. ') + '.';
+			return s;
+		}
+
+		function newPostTotal() {
+			return { забрано: 0, отправлено: 0, покормлено: 0, перья: 0, куплено: [],
+			         ушли: [], пустые: {}, ждут: {}, заметки: [], последняяНаграда: null };
+		}
+
+		/*
+		 * Весь цикл на открытой почте. Награду игра показывает своим окном
+		 * на каждый заказ — на время цикла подменяем `showRewards` на
+		 * подсчёт, итог скажем одним шариком; после — возвращаем как было.
+		 */
+		function workPost(итог) {
+			var b = post();
+			var было = b.showRewards, перьяБыло = num(postData().data.feather);
+			var известно = {};
+			b.showRewards = function (r) { итог.последняяНаграда = r || null; };
+
+			var pass = 0;
+			function круг() {
+				if (pass >= POST_PASSES) return Promise.resolve();
+				pass++;
+				return postPass(итог, известно).then(function (n) { return n ? круг() : null; });
+			}
+
+			function вернуть() {
+				if (b.showRewards === undefined) return;
+				// Свойство экземпляра прятало прототип — снимаем, если было так.
+				if (Object.prototype.hasOwnProperty.call(b, 'showRewards') && было === b.constructor.prototype.showRewards) {
+					delete b.showRewards;
+				} else {
+					b.showRewards = было;
+				}
+				try { итог.перья = Math.max(0, num(postData().data.feather) - перьяБыло); } catch (e) { /* без перьев */ }
+			}
+
+			return круг().then(function () { вернуть(); }, function (err) { вернуть(); throw err; });
+		}
+
+		function runPost() {
+			if (running) return;
+			if (!post() || !hasLocation('birds')) {
+				notify.error('Птичьей почты у вас нет — кнопке нечего делать.');
+				return;
+			}
+			var итог = newPostTotal();
+			busy(true);
+			notify.wait('Открываю птичью почту');
+			openPost()
+				.then(function () { return workPost(итог); })
+				.then(function () {
+					closePost();
+					notify.info(postSummary(итог));
+				}, function (err) {
+					try { closePost(); } catch (e) { /* вернёмся как выйдет */ }
+					notify.error((err && err.message ? err.message : 'Почта не закончена.') +
+						' Успел: ' + postSummary(итог));
+				})
+				.then(otpustit, otpustit);
+		}
+
+		// Почта — последняя остановка обхода. Нет её у игрока — молча мимо.
+		function roundPost(итог) {
+			if (!post() || !hasLocation('birds')) return Promise.resolve();
+			var п = newPostTotal();
+			итог.почта = п;
+			notify.wait('Почта');
+			return openPost()
+				.then(function () { return workPost(п); })
+				.then(function () { closePost(); }, function (err) {
+					try { closePost(); } catch (e) { /* вернёмся как выйдет */ }
+					п.заметки.push(err && err.message ? err.message : 'почта не закончена');
+				});
+		}
+
+		/*
+		 * ═══ ПАСЕКА: ОТПРАВИТЬ ВЕРНУВШИЕСЯ ПЧЕЛИНЫЕ СЕМЬИ ═══════════
+		 *
+		 * Разобрано по объекту `bees` из wurzel_all.js и по живой игре
+		 * 2026-09-19 (docs/game-api.md, «Пасека»). Улей летит за мёдом
+		 * маршрутом («Быстро» 2 ч, «Тщательно» 8 ч, «До последнего цвета»
+		 * 24 ч), мёд по возвращении сам ложится в соты. Ручной труд один:
+		 * КАЖДЫЙ вернувшийся улей отправлять заново — окно с выбором
+		 * маршрута и кнопка «Вылет». У игрока 20 ульев, три раза в сутки.
+		 * Кнопка «Отправить все пчелиные семьи» в игре есть — но только
+		 * для премиум-аккаунта (`_PREMIUM`); по одному — бесплатно всем.
+		 *
+		 * Что делаем одним нажатием, её же функциями:
+		 *   1. каждый вернувшийся улей отправляем ТЕМ ЖЕ маршрутом, каким
+		 *      он летал (по длительности прошлого полёта); улей без истории —
+		 *      маршрутом большинства;
+		 *   2. соты, заполненные до отказа, разливаем по банкам (`fill`) —
+		 *      это же нажатие игрок делает сам, а «гном-пчеловод» игры,
+		 *      который делает это автоматически, — платный;
+		 *   3. чего нельзя — говорим: не посажены цветы, соты полны, маршрут
+		 *      платный.
+		 *
+		 * НИКОГДА: ускорений (`finishHiveTimer` — Coins), платных маршрутов,
+		 * покупки ульев и улучшений, бустеров, пчеловода, смены продукта.
+		 */
+		function bees() {
+			var b = window.bees;
+			if (!b || typeof b.init !== 'function' || typeof b.startFlight !== 'function') return null;
+			return b;
+		}
+
+		function beesData() {
+			var b = bees();
+			var d = b && b.data;
+			return (d && d.config && d.data && d.data.hives) ? d : null;
+		}
+
+		function beesOpen() {
+			var e = document.getElementById('bees');
+			if (!e) return false;
+			try { return getComputedStyle(e).display !== 'none'; } catch (err) { return false; }
+		}
+
+		function openBees() {
+			var b = bees();
+			if (!b) return Promise.reject(new Error('Пасеки на странице нет.'));
+			if (!hasLocation('bees')) return Promise.reject(new Error('У вас нет пасеки.'));
+			if (!(beesOpen() && beesData())) {
+				try { goTo('bees'); b.init(); }
+				catch (e) { return Promise.reject(new Error('Не получилось открыть пасеку.')); }
+			}
+			return postWait(function () { return beesOpen() && !!beesData(); });
+		}
+
+		function closeBees() {
+			var n = currentGarden();
+			try { if (bees()) bees().close(); } catch (e) { /* уже закрыта */ }
+			goTo(n ? 'garden' + n : 'garden');
+		}
+
+		function hiveFlying(h) { return !!(h && h.tour_start && num(h.tour_remain) > 0); }
+
+		// Маршрут улья — по длительности его прошлого полёта.
+		function tourByDuration(d, duration) {
+			for (var t in d.config.tours) {
+				if (num(d.config.tours[t].duration) === num(duration)) return t;
+			}
+			return null;
+		}
+
+		// Маршрут для улья без истории: каким летает большинство; никого — второй.
+		function usualTour(d) {
+			var votes = {}, best = null;
+			for (var k in d.data.hives) {
+				var t = tourByDuration(d, d.data.hives[k].tour_duration);
+				if (!t) continue;
+				votes[t] = (votes[t] || 0) + 1;
+				if (!best || votes[t] > votes[best]) best = t;
+			}
+			return best || (d.config.tours['2'] ? '2' : Object.keys(d.config.tours)[0]);
+		}
+
+		function tourPaid(d, t) {
+			var c = d.config.tours[t];
+			return !c || num(c.money) > 0 || num(c.coins) > 0;
+		}
+
+		// Полные соты — те, что игра сама предлагает разлить (`comps`: ≥ 100 %).
+		function fullCombs(d) {
+			var n = 0;
+			for (var pid in d.config.mapping) {
+				if (num(d.stock && d.stock[pid]) >= num(d.config.max_capacity)) n++;
+			}
+			return n;
+		}
+
+		function newBeesTotal() {
+			return { отправлено: 0, летят: 0, ближайший: 0, разлито: 0, маршрут: '', заметки: [] };
+		}
+
+		function workBees(итог) {
+			var b = bees(), d = beesData();
+			if (!b || !d) return Promise.reject(new Error('Пасека ещё не загрузилась.'));
+			var обычный = usualTour(d);
+			var keys = [];
+			for (var k in d.data.hives) keys.push(k);
+			keys.sort(function (a, c) { return num(a) - num(c); });
+
+			var i = 0, маршруты = {};
+			function отправлять() {
+				for (; i < keys.length; i++) {
+					var id = keys[i], dd = beesData(), h = dd.data.hives[id];
+					if (!h || !h.pid || h.buyable || h.blocked) continue;    // пустой или не куплен
+					if (hiveFlying(h)) {
+						итог.летят++;
+						if (!итог.ближайший || num(h.tour_remain) < итог.ближайший) итог.ближайший = num(h.tour_remain);
+						continue;
+					}
+					var flower = dd.config.mapping[h.pid] && dd.config.mapping[h.pid].pid;
+					if (!(num(dd.garden && dd.garden[flower]) > 0)) {
+						итог.заметки.push('улей ' + id + ': в садах не посажено ' +
+							((window.data_products && data_products[flower] && data_products[flower].name) || ('растение ' + flower)));
+						continue;
+					}
+					if (num(dd.stock && dd.stock[h.pid]) >= num(dd.config.new_capacity)) {
+						итог.заметки.push('улей ' + id + ': соты полны, мёд некуда складывать');
+						continue;
+					}
+					var t = tourByDuration(dd, h.tour_duration) || обычный;
+					if (tourPaid(dd, t)) {
+						итог.заметки.push('улей ' + id + ': прошлый маршрут платный — не отправляю');
+						continue;
+					}
+					notify.wait('Пасека: отправляю улей ' + id);
+					try { b.startFlight(num(id), num(t)); }
+					catch (e) { return Promise.reject(new Error('Не получилось отправить улей ' + id + '.')); }
+					i++;
+					return postWait(function () {
+						var x = beesData().data.hives[id];
+						return hiveFlying(x);
+					}).then(function () {
+						итог.отправлено++;
+						маршруты[t] = (маршруты[t] || 0) + 1;
+						return sleep(PACE_MS).then(отправлять);
+					});
+				}
+				return Promise.resolve();
+			}
+
+			function разлить() {
+				var dd = beesData(), было = fullCombs(dd);
+				if (!было || typeof b.fill !== 'function') return Promise.resolve();
+				notify.wait('Пасека: разливаю мёд из полных сот');
+				try { b.fill(); }
+				catch (e) { return Promise.reject(new Error('Не получилось разлить мёд.')); }
+				return postWait(function () { return fullCombs(beesData()) < было; })
+					.then(function () { итог.разлито = было - fullCombs(beesData()); },
+					      function (err) {
+						// Не разлилось (например, банки на полке полны) — не повод не
+						// отправлять остальных: закрываем её окно, запоминаем слова, а
+						// улей с полными сотами отсеет проверка ниже.
+						try { if (window.basedialog) basedialog.close(); } catch (e) { /* окна нет */ }
+						итог.заметки.push('мёд не разлит: ' + (err && err.message ? err.message : 'игра не ответила'));
+					      });
+			}
+
+			// Сначала разлить: улей с полными сотами игра не отпустит в полёт.
+			return разлить().then(отправлять).then(function () {
+				var лучший = null;
+				for (var t in маршруты) if (!лучший || маршруты[t] > маршруты[лучший]) лучший = t;
+				var dd = beesData();
+				if (лучший && dd.config.tours[лучший]) итог.маршрут = dd.config.tours[лучший].name;
+			});
+		}
+
+		function beesSummary(итог) {
+			var s = 'Пасека: отправлено ' + итог.отправлено;
+			if (итог.маршрут) s += ' («' + итог.маршрут + '»)';
+			s += ', в полёте ' + итог.летят;
+			if (итог.летят && итог.ближайший) s += ' (ближайший вернётся через ' + formatHours(итог.ближайший) + ')';
+			s += '.';
+			if (итог.разлито) s += ' Мёд разлит из ' + итог.разлито + ' ' + plural(итог.разлито, 'соты', 'сот', 'сот') + '.';
+			if (итог.заметки.length) s += ' ' + итог.заметки.join('; ') + '.';
+			return s;
+		}
+
+		function formatHours(sec) {
+			var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+			if (h > 0) return h + ' ч' + (m ? ' ' + m + ' мин' : '');
+			return m + ' мин';
+		}
+
+		function runBees() {
+			if (running) return;
+			if (!bees() || !hasLocation('bees')) {
+				notify.error('Пасеки у вас нет — кнопке нечего делать.');
+				return;
+			}
+			var итог = newBeesTotal();
+			busy(true);
+			notify.wait('Открываю пасеку');
+			openBees()
+				.then(function () { return workBees(итог); })
+				.then(function () {
+					closeBees();
+					notify.info(beesSummary(итог));
+				}, function (err) {
+					try { closeBees(); } catch (e) { /* вернёмся как выйдет */ }
+					notify.error((err && err.message ? err.message : 'Пасека не закончена.') +
+						' Успел: ' + beesSummary(итог));
+				})
+				.then(otpustit, otpustit);
+		}
+
 		function runRound() {
 			if (running) return;
 			if (inWaterGarden()) {
@@ -2179,6 +2393,11 @@
 		var btnPost = gnomeButton('post', POCHTA_GNOM, 30, 45,
 			'Птичья почта: забрать награды, покормить и разослать птиц', runPost);
 
+		// Пасека — гном-пчеловод самой игры (`beekeeper.png`, 400×400 → 45×45):
+		// у неё он платный помощник, у нас — кнопка «отправить вернувшихся».
+		var btnBees = gnomeButton('bees', 'pics/bees/beekeeper.png', 45, 45,
+			'Пасека: отправить вернувшиеся пчелиные семьи, разлить полные соты', runBees);
+
 		var btnPaint = gnomeButton('paint', 'pics/wassergarten/questzwerg_klein.png', 30, 45,
 			'Подсветить сад: синий — полить, зелёный — созрело, чёрный — пусто', function () {
 			var n = paint(!painted);
@@ -2563,6 +2782,13 @@
 			var есть = !!btnPost.parentNode;
 			if (нужен && !есть) bar.appendChild(btnPost);
 			else if (!нужен && есть) btnPost.parentNode.removeChild(btnPost);
+		}
+
+		function syncBeesButton() {
+			var нужен = !!bees() && hasLocation('bees');
+			var есть = !!btnBees.parentNode;
+			if (нужен && !есть) bar.appendChild(btnBees);
+			else if (!нужен && есть) btnBees.parentNode.removeChild(btnBees);
 		}
 		/*
 		 * Убираем следы прежней панели, если код вставили в страницу заново.
@@ -3132,6 +3358,7 @@
 				// снимок живой игры 2026-09-18 — наши гномы стояли на её
 				// слоте заказов 10. Наш цикл работает там сам, кнопки не нужны.
 				if (postOpen()) return 'открыта птичья почта';
+				if (beesOpen()) return 'открыта пасека';
 				for (var i = 0; i < NAKLADKI.length; i++) {
 					if (nakladkaOtkryta(document.getElementById(NAKLADKI[i]))) {
 						return 'открыта накладка #' + NAKLADKI[i];
@@ -3216,6 +3443,7 @@
 			}
 			shag('жнец', syncHarvestButton);
 			shag('почта', syncPostButton);
+			shag('пасека', syncBeesButton);
 			shag('попрошайки', hookWimps);
 			shag('столбик', function () { buildGardens(false); });
 			shag('расстановка', reposition);

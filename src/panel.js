@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Садовый помощник
 // @namespace    si-helper
-// @version      2026.9
+// @version      2026.10
 // @description  Кнопки-помощники внутри игры. Действует только по нажатию.
 // @match        https://*.molehillempire.com/*
 // @match        https://*.sadowajaimperija.ru/*
@@ -1159,6 +1159,10 @@
 		 */
 		var POST_PASSES = 5;        // кругов «забрать → купить → раздать» за одно нажатие
 		var POST_WAIT_MS = 15000;   // сколько ждём ответа сервера на один шаг
+		// Окно игры на экране, а данных ещё нет: столько ждём, прежде чем счесть
+		// окно отказом. Игра показывает окна и не по нашему поводу — достижение,
+		// уровень, акция, — и данные приходят следом; отказ же данных не приносит.
+		var DIALOG_GRACE_MS = 3000;
 
 		function post() {
 			var b = window.birds;
@@ -1193,15 +1197,20 @@
 		}
 
 		function postWait(get) {
-			var deadline = Date.now() + POST_WAIT_MS;
+			var deadline = Date.now() + POST_WAIT_MS, окноС = 0;
 			return new Promise(function (resolve, reject) {
 				(function tick() {
 					var v;
 					try { v = get(); } catch (e) { v = null; }
 					if (v) return resolve(v);
 					var said = gameDialogText();
-					if (said) return reject(new Error('Игра ответила: ' + said));
-					if (Date.now() > deadline) return reject(new Error('почта не ответила вовремя'));
+					if (said) {
+						if (!окноС) окноС = Date.now();
+						if (Date.now() - окноС >= DIALOG_GRACE_MS) return reject(new Error('Игра ответила: ' + said));
+					} else {
+						окноС = 0;
+					}
+					if (Date.now() > deadline) return reject(new Error('игра не ответила вовремя'));
 					setTimeout(tick, 200);
 				})();
 			});
@@ -1653,6 +1662,10 @@
 			return { отправлено: 0, летят: 0, ближайший: 0, разлито: 0, маршрут: '', заметки: [] };
 		}
 
+		// Между ульями — не 140 мс, как между клетками: каждый вылет — свой запрос
+		// к серверу, а игрок жмёт «Вылет» не чаще раза в секунду.
+		var BEES_PACE_MS = 600;
+
 		function workBees(итог) {
 			var b = bees(), d = beesData();
 			if (!b || !d) return Promise.reject(new Error('Пасека ещё не загрузилась.'));
@@ -1660,46 +1673,71 @@
 			var keys = [];
 			for (var k in d.data.hives) keys.push(k);
 			keys.sort(function (a, c) { return num(a) - num(c); });
+			var маршруты = {}, неудачи = {}, отказовПодряд = 0;
 
-			var i = 0, маршруты = {};
-			function отправлять() {
-				for (; i < keys.length; i++) {
-					var id = keys[i], dd = beesData(), h = dd.data.hives[id];
-					if (!h || !h.pid || h.buyable || h.blocked) continue;    // пустой или не куплен
-					if (hiveFlying(h)) {
-						итог.летят++;
-						if (!итог.ближайший || num(h.tour_remain) < итог.ближайший) итог.ближайший = num(h.tour_remain);
-						continue;
+			/*
+			 * ОДИН УЛЕЙ БЕЗ ОТВЕТА НЕ ОСТАНАВЛИВАЕТ ОСТАЛЬНЫХ. Живая игра 2026-09-19:
+			 * первое нажатие отправило ульи 1–12, на 13-м ответ сервера не пришёл
+			 * за 15 с, и помощник бросил всех — игроку пришлось нажимать снова.
+			 * Теперь такой улей пропускается, остальные летят, а пропущенных
+			 * пробуем ещё раз в конце; кто и после этого не ответил — в отчёт.
+			 */
+			function отправлять(список, повтор) {
+				var i = 0;
+				function шаг() {
+					for (; i < список.length; i++) {
+						var id = список[i], dd = beesData(), h = dd.data.hives[id];
+						if (!h || !h.pid || h.buyable || h.blocked) continue;    // пустой или не куплен
+						if (hiveFlying(h)) {
+							if (!повтор) {
+								итог.летят++;
+								if (!итог.ближайший || num(h.tour_remain) < итог.ближайший) итог.ближайший = num(h.tour_remain);
+							}
+							continue;
+						}
+						if (повтор) { /* второй заход — только по тем, кто не ответил */ }
+						var flower = dd.config.mapping[h.pid] && dd.config.mapping[h.pid].pid;
+						if (!(num(dd.garden && dd.garden[flower]) > 0)) {
+							if (!повтор) итог.заметки.push('улей ' + id + ': в садах не посажено ' +
+								((window.data_products && data_products[flower] && data_products[flower].name) || ('растение ' + flower)));
+							continue;
+						}
+						if (num(dd.stock && dd.stock[h.pid]) >= num(dd.config.new_capacity)) {
+							if (!повтор) итог.заметки.push('улей ' + id + ': соты полны, мёд некуда складывать');
+							continue;
+						}
+						var t = tourByDuration(dd, h.tour_duration) || обычный;
+						if (tourPaid(dd, t)) {
+							if (!повтор) итог.заметки.push('улей ' + id + ': прошлый маршрут платный — не отправляю');
+							continue;
+						}
+						notify.wait('Пасека: отправляю улей ' + id + (повтор ? ' (ещё раз)' : ''));
+						try { b.startFlight(num(id), num(t)); }
+						catch (e) { неудачи[id] = { why: 'не получилось отправить', снова: false }; i++; continue; }
+						i++;
+						return postWait(function () { return hiveFlying(beesData().data.hives[id]); })
+							.then(function () {
+								итог.отправлено++;
+								delete неудачи[id];
+								отказовПодряд = 0;
+								маршруты[t] = (маршруты[t] || 0) + 1;
+								return sleep(BEES_PACE_MS).then(шаг);
+							}, function (err) {
+								// Молчание — запомнить и попробовать ещё раз в конце.
+								// Отказ словами — не повторять; три отказа подряд —
+								// остановиться с этими словами: сервер что-то говорит.
+								try { if (window.basedialog) basedialog.close(); } catch (e) { /* окна нет */ }
+								var why = (err && err.message) ? err.message : 'игра не ответила';
+								var словами = why.indexOf('Игра ответила') === 0;
+								неудачи[id] = { why: why, снова: !словами };
+								отказовПодряд = словами ? отказовПодряд + 1 : 0;
+								if (отказовПодряд >= 3) return Promise.reject(err);
+								return sleep(BEES_PACE_MS * 2).then(шаг);
+							});
 					}
-					var flower = dd.config.mapping[h.pid] && dd.config.mapping[h.pid].pid;
-					if (!(num(dd.garden && dd.garden[flower]) > 0)) {
-						итог.заметки.push('улей ' + id + ': в садах не посажено ' +
-							((window.data_products && data_products[flower] && data_products[flower].name) || ('растение ' + flower)));
-						continue;
-					}
-					if (num(dd.stock && dd.stock[h.pid]) >= num(dd.config.new_capacity)) {
-						итог.заметки.push('улей ' + id + ': соты полны, мёд некуда складывать');
-						continue;
-					}
-					var t = tourByDuration(dd, h.tour_duration) || обычный;
-					if (tourPaid(dd, t)) {
-						итог.заметки.push('улей ' + id + ': прошлый маршрут платный — не отправляю');
-						continue;
-					}
-					notify.wait('Пасека: отправляю улей ' + id);
-					try { b.startFlight(num(id), num(t)); }
-					catch (e) { return Promise.reject(new Error('Не получилось отправить улей ' + id + '.')); }
-					i++;
-					return postWait(function () {
-						var x = beesData().data.hives[id];
-						return hiveFlying(x);
-					}).then(function () {
-						итог.отправлено++;
-						маршруты[t] = (маршруты[t] || 0) + 1;
-						return sleep(PACE_MS).then(отправлять);
-					});
+					return Promise.resolve();
 				}
-				return Promise.resolve();
+				return шаг();
 			}
 
 			function разлить() {
@@ -1716,11 +1754,17 @@
 						// улей с полными сотами отсеет проверка ниже.
 						try { if (window.basedialog) basedialog.close(); } catch (e) { /* окна нет */ }
 						итог.заметки.push('мёд не разлит: ' + (err && err.message ? err.message : 'игра не ответила'));
-					      });
+					});
 			}
 
 			// Сначала разлить: улей с полными сотами игра не отпустит в полёт.
-			return разлить().then(отправлять).then(function () {
+			return разлить().then(function () { return отправлять(keys, false); }).then(function () {
+				var снова = [];
+				for (var id in неудачи) if (неудачи[id].снова) снова.push(id);
+				if (!снова.length) return null;
+				return sleep(BEES_PACE_MS * 3).then(function () { return отправлять(снова, true); });
+			}).then(function () {
+				for (var id in неудачи) итог.заметки.push('улей ' + id + ': ' + неудачи[id].why);
 				var лучший = null;
 				for (var t in маршруты) if (!лучший || маршруты[t] > маршруты[лучший]) лучший = t;
 				var dd = beesData();

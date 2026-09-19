@@ -1915,7 +1915,8 @@ def test_bees_sends_returned_hives_their_own_way_and_bottles_full_combs(game):
 
 
 def test_bees_stops_with_the_games_own_words_when_the_server_refuses(server):
-    """Отказ сервера — остановка с его словами, экран закрыт, гномы отпущены."""
+    """Три отказа словами подряд — остановка с этими словами (сервер что-то
+    говорит, долбить дальше незачем), экран закрыт, гномы отпущены."""
     with stand(server, "?paseka_otkaz=1") as conn:
         _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=bees]').length>0",
               "гнома пасеки нет")
@@ -1923,7 +1924,7 @@ def test_bees_stops_with_the_games_own_words_when_the_server_refuses(server):
         итог = _zhdat_paseku(conn, timeout=40)
         p = _paseka(conn)
         assert "Игра ответила" in итог and "Сервер отказал нарочно" in итог, итог
-        assert sum(1 for z in p["zaprosy"] if z.startswith("bees_startflight")) == 1, p["zaprosy"]
+        assert sum(1 for z in p["zaprosy"] if z.startswith("bees_startflight")) == 3, p["zaprosy"]
         assert not p["otkryta"], "после отказа пасека осталась открытой"
         assert conn.evaluate("!document.querySelector('#si-helper [data-si-button=bees]').disabled"), \
             "после отказа гномы остались притушенными"
@@ -1960,3 +1961,36 @@ def test_bees_keeps_a_full_hive_home_when_the_honey_cannot_be_bottled(server):
         assert "мёд не разлит: Игра ответила: Ошибка Банки полны" in итог, итог
         assert "улей 5: соты полны, мёд некуда складывать" in итог, итог
         assert not p["otkryta"], "пасека осталась открытой"
+
+
+def test_bees_skips_a_silent_hive_and_finishes_the_rest(server):
+    """Один улей без ответа сервера не останавливает пасеку: остальные летят,
+    молчавший пробуем ещё раз в конце. Живая игра 2026-09-19: на 13-м улье из
+    20 ответ не пришёл за 15 с, помощник бросил всех — игроку пришлось жать снова."""
+    with stand(server, "?paseka_molchit=4") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=bees]').length>0",
+              "гнома пасеки нет")
+        _press(conn, "bees")
+        итог = _zhdat_paseku(conn, timeout=90)
+        p = _paseka(conn)
+        assert p["danger"] == [], p["danger"]
+        starts = [z for z in p["zaprosy"] if z.startswith("bees_startflight")]
+        assert starts == ["bees_startflight id=1 tour=2", "bees_startflight id=4 tour=2",
+                          "bees_startflight id=5 tour=2", "bees_startflight id=4 tour=2"], starts
+        assert "отправлено 3" in итог, итог
+        assert "не закончена" not in итог and "не ответила" not in итог, итог
+        assert sorted(p["letyat"]) == [1, 2, 4, 5], p["letyat"]
+
+
+def test_bees_ignores_the_games_own_popup_while_waiting(server):
+    """Окно игры не по нашему поводу (достижение) посреди работы — не отказ:
+    данные приходят следом, и пасека идёт дальше."""
+    with stand(server, "?paseka_okno=1") as conn:
+        _wait(conn, "document.querySelectorAll('#si-helper [data-si-button=bees]').length>0",
+              "гнома пасеки нет")
+        _press(conn, "bees")
+        итог = _zhdat_paseku(conn)
+        p = _paseka(conn)
+        assert p["danger"] == [], p["danger"]
+        assert "отправлено 3" in итог, итог
+        assert "Игра ответила" not in итог and "Достижение" not in итог, итог

@@ -1219,6 +1219,8 @@ if (/[?&]pochta_otkryta=1/.test(location.search) && POCHTA_EST) {
        ?paseka_otkryta=1      — страница открывается с открытой пасекой
        ?paseka_otkaz=1        — сервер отказывает отправке словами
        ?paseka_banki_polny=1  — разлить некуда: улей с полными сотами должен остаться дома
+       ?paseka_molchit=N      — на первый вылет улья N сервер молчит, со второго отвечает
+       ?paseka_okno=1         — после первого вылета игра показывает своё окно до данных
      Ульи стенда нарочно разные — по одному на каждое правило помощника:
        1 вернулся, летал «Тщательно»           → отправить тем же маршрутом
        2 в полёте                              → не трогать, посчитать
@@ -1239,6 +1241,13 @@ var PASEKA_EST = !/[?&]paseki=net/.test(location.search);
 if (PASEKA_EST && quicknavi.data.garden1) quicknavi.data.bees = 1;
 var PASEKA_OTKAZ = /[?&]paseka_otkaz=1/.test(location.search);
 var PASEKA_BANKI_POLNY = /[?&]paseka_banki_polny=1/.test(location.search);   // разлить некуда
+// ?paseka_molchit=N — на первый вылет улья N сервер не отвечает вовсе (ни данных, ни окна);
+// со второй попытки отвечает. Так 2026-09-19 у игрока встал 13-й улей из 20.
+var PASEKA_MOLCHIT = (function () { var m = /[?&]paseka_molchit=(\d+)/.exec(location.search); return m ? +m[1] : 0; })();
+var _pasekaMolchal = false;
+// ?paseka_okno=1 — после первого вылета игра показывает своё окно («Достижение!»)
+// раньше, чем приходят данные: помощник не должен счесть его отказом.
+var PASEKA_OKNO = /[?&]paseka_okno=1/.test(location.search);
 
 data_products[52] = { name: 'Васильки', category: 'v', sx: 1, sy: 1, plantable: true, crop: 4, price: 1.9 };
 data_products[3] = { name: 'Салат', category: 'v', sx: 1, sy: 1, plantable: true, crop: 4, price: 0.08 };
@@ -1289,6 +1298,14 @@ var bees = (function () {
 	my.init = function () { close_all(); zapros({ 'do': 'bees_init' }, function () { otvet(); showDiv('bees'); }); };
 	my.close = function () { hideDiv('bees'); };
 	my.startFlight = function (id, tour) {
+		if (PASEKA_MOLCHIT && +id === PASEKA_MOLCHIT && !_pasekaMolchal) {
+			_pasekaMolchal = true;
+			window.__pasekaZaprosy.push({ 'do': 'bees_startflight', id: id, tour: tour });
+			window.__sent.push({ file: 'bees', 'do': 'bees_startflight' });
+			return;   // ответа не будет
+		}
+		var pervyy = window.__pasekaZaprosy.filter(function (z) { return z['do'] === 'bees_startflight'; }).length === 0;
+		if (PASEKA_OKNO && pervyy) setTimeout(function () { basedialog.show({ type: 'info', headline: 'Достижение получено!', text: 'Первый вылет дня' }); }, 60);
 		zapros({ 'do': 'bees_startflight', id: id, tour: tour }, function () {
 			if (PASEKA_OTKAZ) return otkaz('Сервер отказал нарочно');
 			var h = BEES_STATE.hives[id], t = BEES_CFG.tours[tour];
@@ -1326,6 +1343,14 @@ var bees = (function () {
 	my.buyResearch = opasno('исследование');
 	return my;
 })();
+
+// При отказе сервера ульев должно быть БОЛЬШЕ трёх: иначе «стоп после трёх
+// отказов подряд» неотличим от «прошёл всех» — мутация это показала.
+if (PASEKA_OTKAZ) {
+	BEES_STATE.hives[8] = { level: 4, pid: '316', tour_start: NOW - 30000, tour_duration: 28800, tour_remain: -300 };
+	BEES_STATE.hives[9] = { level: 4, pid: '316', tour_start: NOW - 30000, tour_duration: 28800, tour_remain: -300 };
+	BEES_STATE.hives[10] = { level: 4, pid: '316', tour_start: NOW - 30000, tour_duration: 28800, tour_remain: -300 };
+}
 
 if (/[?&]paseka_otkryta=1/.test(location.search) && PASEKA_EST) {
 	window.addEventListener('load', function () { bees.init(); });

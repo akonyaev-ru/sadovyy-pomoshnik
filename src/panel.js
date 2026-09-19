@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Садовый помощник
 // @namespace    si-helper
-// @version      2026.7
+// @version      2026.8
 // @description  Кнопки-помощники внутри игры. Действует только по нажатию.
 // @match        https://*.molehillempire.com/*
 // @match        https://*.sadowajaimperija.ru/*
@@ -1664,6 +1664,7 @@
 		 * автомат 45×45, гном-исследователь 36×45, солнце 56×44.
 		 */
 		function gfx(path) {
+			if (path.indexOf('data:') === 0) return path;   // своя картинка, не с сервера игры
 			var base = (typeof window._GFX === 'string' && window._GFX)
 				? window._GFX
 				: 'https://wurzelimperium.wavecdn.net/';
@@ -2162,9 +2163,20 @@
 		var btnRound = gnomeButton('round', 'pics/wassergarten/boosterzwerg_klein.png', 25, 45,
 			'Обойти все сады: собрать, посадить, полить', runRound);
 
-		// Птичья почта — её же иконка из быстрой навигации (40×36). Гнома
-		// у почты нет: там работает летун-НПС в 335 px, в ряд он не встанет.
-		var btnPost = gnomeButton('post', 'pics/birds/Vogelposticon01.gif', 40, 36,
+		/*
+		 * ГНОМ ПОЧТЫ — ЕДИНСТВЕННАЯ НАША КАРТИНКА В РЯДУ.
+		 *
+		 * У почты в игре нет гнома: её персонаж — летун в 335 px верхом на
+		 * птице, в ряд он не встаёт, а иконка почты 40×36 висела среди гномов
+		 * табличкой («чтобы не табличка висела, а сидел гном» — владелец,
+		 * 2026-09-18). Гнома-почтальона нарисовал владелец 2026-09-19 по
+		 * мотивам летуна: лётный шлем, очки, рюкзак с письмами, посох. Он
+		 * лежит внутри программы (30×45, PNG, ~3,4 КБ), а не грузится с
+		 * сервера игры, как остальные, — это наш рисунок, а не её.
+		 */
+		var POCHTA_GNOM = 'data:image/png;base64,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';
+
+		var btnPost = gnomeButton('post', POCHTA_GNOM, 30, 45,
 			'Птичья почта: забрать награды, покормить и разослать птиц', runPost);
 
 		var btnPaint = gnomeButton('paint', 'pics/wassergarten/questzwerg_klein.png', 30, 45,

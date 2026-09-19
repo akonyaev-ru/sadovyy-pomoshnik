@@ -473,12 +473,18 @@ def test_buttons_are_the_games_own_gnomes(server):
     assert "questzwerg_klein.png" in joined, "нет гнома с фонарём"
     assert "marktplatz_neu.png" in joined, "нет рыночной площади — быстрой продажи"
     assert "boosterzwerg_klein.png" in joined, "нет гнома-ускорителя — обхода всех садов"
-    assert "Vogelposticon01.gif" in joined, "нет птичьей почты — её же иконки из быстрой навигации"
+    # Гном почты — единственная НАША картинка: её нарисовал владелец
+    # 2026-09-19, и она лежит внутри программы, а не грузится с сервера игры.
+    pochta = [s for s in srcs if s.startswith("data:image/png;base64,")]
+    assert len(pochta) == 1, f"гном почты должен быть одной встроенной картинкой: {srcs}"
+    assert "Vogelposticon01.gif" not in joined, "табличка почты вернулась в ряд гномов"
     # Жнец игры в стенде НАНЯТ, значит своего жнеца рисовать нельзя:
     # два жнеца в полосе — та же ошибка, что была с двумя жуками.
     assert "sensenzwerg.gif" not in joined, "свой жнец при нанятом жнеце игры — это второй жнец"
     assert "sonne.gif" not in joined, "вернулось солнце — оно выбивалось из ряда гномов"
     for s in srcs:
+        if s in pochta:
+            continue
         assert s.startswith("http"), f"путь к картинке игры должен быть полным: {s}"
 
 
@@ -1694,9 +1700,18 @@ def _zhdat_pochtu(conn, timeout: float = 60.0) -> str:
 
 
 def test_post_gnome_and_icon_appear_only_when_the_player_has_the_post(game, server):
-    """Кнопка почты и её иконка в столбике — только если почта у игрока есть."""
+    """Кнопка почты и её иконка в столбике — только если почта у игрока есть.
+
+    Гном — встроенный рисунок владельца 30×45; иконка в столбике — игры."""
     _wait(game, "document.querySelectorAll('#si-helper [data-si-button=post]').length>0",
           "гнома почты нет")
+    gnome = game.evaluate(
+        "(function(){var b=document.querySelector('#si-helper [data-si-button=post]');"
+        "return {src:(b.getAttribute('src')||'').slice(0,22), w:b.getAttribute('data-si-w'), h:b.getAttribute('data-si-h'),"
+        " ok:b.complete && b.naturalWidth>0}})()")
+    assert gnome["src"] == "data:image/png;base64,", gnome
+    assert (gnome["w"], gnome["h"]) == ("30", "45"), gnome
+    assert gnome["ok"], "встроенная картинка гнома почты не загрузилась"
     icons = _nav_icons(game)
     assert any(i.startswith("birds|") and "Vogelposticon01.gif" in i for i in icons), icons
 
